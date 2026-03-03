@@ -58,6 +58,8 @@ class CosyVoiceModel:
         assert (
             self.stream_scale_factor >= 1
         ), "stream_scale_factor should be greater than 1, change it according to your actual rtf"
+        self.stream_poll_interval = float(os.getenv("COSYVOICE_STREAM_POLL_INTERVAL", "0.02"))
+        self.force_cuda_gc = os.getenv("COSYVOICE_FORCE_CUDA_GC", "False").lower() == "true"
         self.llm_context = (
             torch.cuda.stream(torch.cuda.Stream(self.device))
             if torch.cuda.is_available()
@@ -70,6 +72,7 @@ class CosyVoiceModel:
         self.mel_overlap_dict = {}
         self.flow_cache_dict = {}
         self.hift_cache_dict = {}
+        self.token_ready_event_dict = {}
         self.silent_tokens = []
 
     def load(self, llm_model, flow_model, hift_model):
@@ -193,11 +196,20 @@ class CosyVoiceModel:
                 else:
                     cur_silent_token_num = 0
                 self.tts_speech_token_dict[uuid].append(i)
+                event = self.token_ready_event_dict.get(uuid)
+                if event is not None:
+                    event.set()
         self.llm_end_dict[uuid] = True
+        event = self.token_ready_event_dict.get(uuid)
+        if event is not None:
+            event.set()
 
     def vc_job(self, source_speech_token, uuid):
         self.tts_speech_token_dict[uuid] = source_speech_token.flatten().tolist()
         self.llm_end_dict[uuid] = True
+        event = self.token_ready_event_dict.get(uuid)
+        if event is not None:
+            event.set()
 
     def token2wav(
         self,
@@ -297,6 +309,7 @@ class CosyVoiceModel:
             self.hift_cache_dict[this_uuid] = None
             self.mel_overlap_dict[this_uuid] = torch.zeros(1, 80, 0)
             self.flow_cache_dict[this_uuid] = torch.zeros(1, 80, 0, 2)
+            self.token_ready_event_dict[this_uuid] = threading.Event()
         if source_speech_token.shape[1] == 0:
             p = threading.Thread(
                 target=self.llm_job,
@@ -316,7 +329,8 @@ class CosyVoiceModel:
         if stream is True:
             token_hop_len = self.token_min_hop_len
             while True:
-                time.sleep(0.1)
+                self.token_ready_event_dict[this_uuid].wait(self.stream_poll_interval)
+                self.token_ready_event_dict[this_uuid].clear()
                 if (
                     len(self.tts_speech_token_dict[this_uuid])
                     >= token_hop_len + self.token_overlap_len
@@ -386,7 +400,8 @@ class CosyVoiceModel:
             self.mel_overlap_dict.pop(this_uuid)
             self.hift_cache_dict.pop(this_uuid)
             self.flow_cache_dict.pop(this_uuid)
-        if torch.cuda.is_available():
+            self.token_ready_event_dict.pop(this_uuid, None)
+        if torch.cuda.is_available() and self.force_cuda_gc:
             torch.cuda.empty_cache()
             torch.cuda.current_stream().synchronize()
 
@@ -413,6 +428,8 @@ class CosyVoice2Model(CosyVoiceModel):
         assert (
             self.stream_scale_factor >= 1
         ), "stream_scale_factor should be greater than 1, change it according to your actual rtf"
+        self.stream_poll_interval = float(os.getenv("COSYVOICE_STREAM_POLL_INTERVAL", "0.02"))
+        self.force_cuda_gc = os.getenv("COSYVOICE_FORCE_CUDA_GC", "False").lower() == "true"
         # hift cache
         self.mel_cache_len = 8
         self.source_cache_len = int(self.mel_cache_len * 480)
@@ -429,6 +446,7 @@ class CosyVoice2Model(CosyVoiceModel):
         self.tts_speech_token_dict = {}
         self.llm_end_dict = {}
         self.hift_cache_dict = {}
+        self.token_ready_event_dict = {}
         self.silent_tokens = []
 
     def load_jit(self, flow_encoder_model):
@@ -443,7 +461,9 @@ class CosyVoice2Model(CosyVoiceModel):
             model=model_dir,
             skip_tokenizer_init=True,
             enable_prompt_embeds=True,
-            gpu_memory_utilization=0.5,
+            gpu_memory_utilization=float(
+                os.getenv("COSYVOICE_VLLM_GPU_MEMORY_UTILIZATION", "0.75")
+            ),
         )
         self.llm.vllm = LLMEngine.from_engine_args(engine_args)
         self.llm.lock = threading.Lock()
@@ -543,6 +563,7 @@ class CosyVoice2Model(CosyVoiceModel):
                 False,
             )
             self.hift_cache_dict[this_uuid] = None
+            self.token_ready_event_dict[this_uuid] = threading.Event()
         if source_speech_token.shape[1] == 0:
             p = threading.Thread(
                 target=self.llm_job,
@@ -561,17 +582,19 @@ class CosyVoice2Model(CosyVoiceModel):
         p.start()
         if stream is True:
             token_offset = 0
+            token_hop_len = self.token_hop_len
             prompt_token_pad = int(
-                np.ceil(flow_prompt_speech_token.shape[1] / self.token_hop_len)
-                * self.token_hop_len
+                np.ceil(flow_prompt_speech_token.shape[1] / token_hop_len)
+                * token_hop_len
                 - flow_prompt_speech_token.shape[1]
             )
             while True:
-                time.sleep(0.1)
+                self.token_ready_event_dict[this_uuid].wait(self.stream_poll_interval)
+                self.token_ready_event_dict[this_uuid].clear()
                 this_token_hop_len = (
-                    self.token_hop_len + prompt_token_pad
+                    token_hop_len + prompt_token_pad
                     if token_offset == 0
-                    else self.token_hop_len
+                    else token_hop_len
                 )
                 if (
                     len(self.tts_speech_token_dict[this_uuid]) - token_offset
@@ -595,9 +618,9 @@ class CosyVoice2Model(CosyVoiceModel):
                         finalize=False,
                     )
                     token_offset += this_token_hop_len
-                    self.token_hop_len = min(
+                    token_hop_len = min(
                         self.token_max_hop_len,
-                        self.token_hop_len * self.stream_scale_factor,
+                        token_hop_len * self.stream_scale_factor,
                     )
                     yield {"tts_speech": this_tts_speech.cpu()}
                 if (
@@ -642,7 +665,8 @@ class CosyVoice2Model(CosyVoiceModel):
             self.tts_speech_token_dict.pop(this_uuid)
             self.llm_end_dict.pop(this_uuid)
             self.hift_cache_dict.pop(this_uuid)
-        if torch.cuda.is_available():
+            self.token_ready_event_dict.pop(this_uuid, None)
+        if torch.cuda.is_available() and self.force_cuda_gc:
             torch.cuda.empty_cache()
             torch.cuda.current_stream().synchronize()
 
@@ -669,6 +693,8 @@ class CosyVoice3Model(CosyVoice2Model):
         assert (
             self.stream_scale_factor >= 1
         ), "stream_scale_factor should be greater than 1, change it according to your actual rtf"
+        self.stream_poll_interval = float(os.getenv("COSYVOICE_STREAM_POLL_INTERVAL", "0.02"))
+        self.force_cuda_gc = os.getenv("COSYVOICE_FORCE_CUDA_GC", "False").lower() == "true"
         # rtf and decoding related
         self.llm_context = (
             torch.cuda.stream(torch.cuda.Stream(self.device))
@@ -680,6 +706,7 @@ class CosyVoice3Model(CosyVoice2Model):
         self.tts_speech_token_dict = {}
         self.llm_end_dict = {}
         self.hift_cache_dict = {}
+        self.token_ready_event_dict = {}
         # FSQ silent and breath token
         self.silent_tokens = [1, 2, 28, 29, 55, 248, 494, 2241, 2242, 2322, 2323]
 

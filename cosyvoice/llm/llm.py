@@ -174,6 +174,16 @@ class TransformerLM(torch.nn.Module):
             min_token_text_ratio: float = 2,
             uuid: str = '',
     ) -> Generator[torch.Tensor, None, None]:
+        # 允许通过环境变量统一调节速度/质量权衡
+        sampling = int(os.getenv("COSYVOICE_SAMPLING_TOP_K", str(sampling)))
+        max_token_text_ratio = float(
+            os.getenv("COSYVOICE_MAX_TOKEN_TEXT_RATIO", str(max_token_text_ratio))
+        )
+        min_token_text_ratio = float(
+            os.getenv("COSYVOICE_MIN_TOKEN_TEXT_RATIO", str(min_token_text_ratio))
+        )
+        if min_token_text_ratio > max_token_text_ratio:
+            min_token_text_ratio = max_token_text_ratio
         device = text.device
         text = torch.concat([prompt_text, text], dim=1)
         text_len += prompt_text_len
@@ -470,6 +480,15 @@ class Qwen2LM(TransformerLM):
             min_token_text_ratio: float = 2,
             uuid: str = '',
     ) -> Generator[torch.Tensor, None, None]:
+        sampling = int(os.getenv("COSYVOICE_SAMPLING_TOP_K", str(sampling)))
+        max_token_text_ratio = float(
+            os.getenv("COSYVOICE_MAX_TOKEN_TEXT_RATIO", str(max_token_text_ratio))
+        )
+        min_token_text_ratio = float(
+            os.getenv("COSYVOICE_MIN_TOKEN_TEXT_RATIO", str(min_token_text_ratio))
+        )
+        if min_token_text_ratio > max_token_text_ratio:
+            min_token_text_ratio = max_token_text_ratio
         device = text.device
         text = torch.concat([prompt_text, text], dim=1)
         text_len += prompt_text_len
@@ -505,33 +524,71 @@ class Qwen2LM(TransformerLM):
     def inference_wrapper(self, lm_input, sampling, min_len, max_len, uuid):
         if hasattr(self, 'vllm'):
             from vllm import SamplingParams, RequestOutput
-            sampling_params = SamplingParams(top_k=sampling,
-                                             stop_token_ids=self.stop_token_ids,
-                                             min_tokens=min_len,
-                                             max_tokens=max_len)
+            # 通过环境变量统一控制采样，兼顾表达多样性与稳定性
+            top_p = float(os.getenv("COSYVOICE_VLLM_TOP_P", "0.8"))
+            temperature = float(os.getenv("COSYVOICE_VLLM_TEMPERATURE", "1.0"))
+            repetition_penalty = float(os.getenv("COSYVOICE_VLLM_REPETITION_PENALTY", "1.05"))
+            frequency_penalty = float(os.getenv("COSYVOICE_VLLM_FREQUENCY_PENALTY", "0.0"))
+            presence_penalty = float(os.getenv("COSYVOICE_VLLM_PRESENCE_PENALTY", "0.0"))
+            step_sleep = float(os.getenv("COSYVOICE_VLLM_STEP_SLEEP", "0.0005"))
+            try:
+                sampling_params = SamplingParams(
+                    top_k=sampling,
+                    top_p=top_p,
+                    temperature=temperature,
+                    repetition_penalty=repetition_penalty,
+                    frequency_penalty=frequency_penalty,
+                    presence_penalty=presence_penalty,
+                    stop_token_ids=self.stop_token_ids,
+                    min_tokens=min_len,
+                    max_tokens=max_len,
+                )
+            except TypeError:
+                sampling_params = SamplingParams(
+                    top_k=sampling,
+                    top_p=top_p,
+                    temperature=temperature,
+                    repetition_penalty=repetition_penalty,
+                    stop_token_ids=self.stop_token_ids,
+                    min_tokens=min_len,
+                    max_tokens=max_len,
+                )
             with self.lock:
-                self.vllm.add_request(uuid, {"prompt_embeds": lm_input.squeeze(0).to(torch.bfloat16).to(lm_input.device)}, sampling_params)
+                self.vllm.add_request(
+                    uuid,
+                    {"prompt_embeds": lm_input.squeeze(0).to(torch.bfloat16).to(lm_input.device)},
+                    sampling_params,
+                )
                 self.vllm_output_queue[uuid] = queue.Queue()
             out_tokens = []
-            while True:
+            try:
+                while True:
+                    with self.lock:
+                        if self.vllm_output_queue[uuid].empty() is True:
+                            request_outputs: List[RequestOutput] = self.vllm.step()
+                            for request_output in request_outputs:
+                                if request_output.request_id not in self.vllm_output_queue:
+                                    continue
+                                if not request_output.outputs:
+                                    continue
+                                token_ids = list(request_output.outputs[0].token_ids)
+                                if not token_ids:
+                                    continue
+                                top_ids = token_ids[-1]
+                                self.vllm_output_queue[request_output.request_id].put(top_ids)
+                    if self.vllm_output_queue[uuid].empty() is False:
+                        top_ids = self.vllm_output_queue[uuid].get()
+                        if top_ids in self.stop_token_ids:
+                            break
+                        # in stream mode, yield token one by one
+                        yield top_ids
+                        out_tokens.append(top_ids)
+                        if len(out_tokens) == max_len:
+                            break
+                    time.sleep(step_sleep)
+            finally:
                 with self.lock:
-                    if self.vllm_output_queue[uuid].empty() is True:
-                        request_outputs: List[RequestOutput] = self.vllm.step()
-                        for request_output in request_outputs:
-                            top_ids = list(request_output.outputs[0].token_ids)[-1]
-                            self.vllm_output_queue[request_output.request_id].put(top_ids)
-                if self.vllm_output_queue[uuid].empty() is False:
-                    top_ids = self.vllm_output_queue[uuid].get()
-                    if top_ids in self.stop_token_ids:
-                        break
-                    # in stream mode, yield token one by one
-                    yield top_ids
-                    out_tokens.append(top_ids)
-                    if len(out_tokens) == max_len:
-                        break
-                time.sleep(0.001)
-            with self.lock:
-                self.vllm_output_queue.pop(uuid)
+                    self.vllm_output_queue.pop(uuid, None)
         else:
             out_tokens = []
             cache = None

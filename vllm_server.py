@@ -25,7 +25,7 @@ from cosyvoice.vllm.cosyvoice2 import CosyVoice2ForCausalLM
 
 ModelRegistry.register_model("CosyVoice2ForCausalLM", CosyVoice2ForCausalLM)
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -51,6 +51,12 @@ PROMPT_WAV = os.getenv("COSYVOICE_PROMPT_WAV", "raw/merged_prompt.wav")
 V3_SYS_PREFIX = "You are a helpful assistant.<|endofprompt|>"
 PORT = int(os.getenv("PORT", "9880"))
 ENABLE_INSTRUCT = os.getenv("COSYVOICE_ENABLE_INSTRUCT", "True").lower() == "true"
+TTS_CONCURRENCY = int(os.getenv("COSYVOICE_TTS_CONCURRENCY", "1"))
+MAX_TEXT_CHARS = int(os.getenv("COSYVOICE_MAX_TEXT_CHARS", "1200"))
+MAX_SEGMENTS = int(os.getenv("COSYVOICE_MAX_SEGMENTS", "24"))
+ENABLE_TEXT_CLEAN = os.getenv("COSYVOICE_ENABLE_TEXT_CLEAN", "True").lower() == "true"
+ENABLE_ZH_NUM_NORMALIZE = os.getenv("COSYVOICE_ENABLE_ZH_NUM_NORMALIZE", "True").lower() == "true"
+ENABLE_AUTO_BREATH = os.getenv("COSYVOICE_ENABLE_AUTO_BREATH", "True").lower() == "true"
 
 # 单个 chunk 最大等待秒数，超过视为 LLM 跑飞，截断当前段并继续下一段
 # 由于每次都要处理音频特征，首字延迟可能较高，增加到 30 秒
@@ -71,6 +77,7 @@ logger = logging.getLogger("tts-server")
 # ============================================================
 cosyvoice = None
 sample_rate = 24000
+tts_stream_semaphore = threading.Semaphore(max(1, TTS_CONCURRENCY))
 
 # ============================================================
 #  FastAPI
@@ -113,6 +120,21 @@ def _clean_text(text: str) -> str:
     text = re.sub(r"[（(][^）)]*[）)]", "", text)  # 括号内舞台指示
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def _contains_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", text))
+
+
+def _cap_segments(segments, max_segments: int):
+    """限制分段数量，避免超长文本引发极端延迟。"""
+    if len(segments) <= max_segments:
+        return segments
+    head = segments[: max_segments - 1]
+    tail = "".join(segments[max_segments - 1 :]).strip()
+    if tail:
+        head.append(tail)
+    return head
 
 
 # ============================================================
@@ -316,13 +338,26 @@ def _iter_with_timeout(gen, timeout: float):
 @app.post("/tts/complete")
 async def tts_complete(req: TTSRequest):
     t0 = time.perf_counter()
-    text = _clean_text(req.text)
+    raw_text = (req.text or "").strip()
+    if not raw_text:
+        return StreamingResponse(iter([]), media_type="audio/wav")
+    if len(raw_text) > MAX_TEXT_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"text too long ({len(raw_text)} chars), max={MAX_TEXT_CHARS}",
+        )
+
+    text = _clean_text(raw_text) if ENABLE_TEXT_CLEAN else raw_text
     if not text:
         return StreamingResponse(iter([]), media_type="audio/wav")
 
-    # 数字规范化 + 气口插入
-    text = _normalize_chinese_num(text)
-    text = _insert_breath(text)
+    is_cjk = _contains_cjk(text)
+    # 仅对中文文本进行数字规范化，避免英文语句被过度改写
+    if is_cjk and ENABLE_ZH_NUM_NORMALIZE:
+        text = _normalize_chinese_num(text)
+    # 避免重复插入 breath
+    if is_cjk and ENABLE_AUTO_BREATH and "[breath]" not in text:
+        text = _insert_breath(text)
 
     use_instruct = bool(req.instruct) and ENABLE_INSTRUCT and hasattr(cosyvoice, "inference_instruct2")
     instruct_text = _ensure_instruct(req.instruct) if use_instruct else ""
@@ -330,79 +365,82 @@ async def tts_complete(req: TTSRequest):
     logger.info("收到请求(complete) | 模式: %s | 文本: %s", mode, text)
 
     segments = cosyvoice.frontend.text_normalize(text, split=True)
+    segments = _cap_segments(segments, max_segments=max(1, MAX_SEGMENTS))
+    logger.info("文本分段完成 | 段数: %d", len(segments))
 
     def generate():
-        total_sec = 0.0
-        yield _wav_header(sample_rate)
+        with tts_stream_semaphore:
+            total_sec = 0.0
+            yield _wav_header(sample_rate)
 
-        for i, seg in enumerate(segments):
-            seg_t0 = time.perf_counter()
-            logger.info("开始第 %d/%d 段: %s", i + 1, len(segments), seg)
+            for i, seg in enumerate(segments):
+                seg_t0 = time.perf_counter()
+                logger.info("开始第 %d/%d 段: %s", i + 1, len(segments), seg)
 
-            try:
-                if use_instruct:
-                    seg_out = cosyvoice.inference_instruct2(
-                        seg,
-                        instruct_text,
-                        PROMPT_WAV,
-                        zero_shot_spk_id="custom_speaker",
-                        stream=True,
-                        text_frontend=False,
+                try:
+                    if use_instruct:
+                        seg_out = cosyvoice.inference_instruct2(
+                            seg,
+                            instruct_text,
+                            PROMPT_WAV,
+                            zero_shot_spk_id="custom_speaker",
+                            stream=True,
+                            text_frontend=False,
+                        )
+                    else:
+                        # 默认 zero_shot 模式 + 预注册 id
+                        # 注意：prompt_text 必须与注册时完全一致（包含 prefix）
+                        seg_out = cosyvoice.inference_zero_shot(
+                            seg,
+                            V3_SYS_PREFIX + PROMPT_TEXT,
+                            PROMPT_WAV,
+                            zero_shot_spk_id="custom_speaker",
+                            stream=True,
+                            text_frontend=False,
+                        )
+
+                    chunks = 0
+                    stalled = False
+                    for chunk, timed_out in _iter_with_timeout(
+                        seg_out, CHUNK_STALL_TIMEOUT
+                    ):
+                        if timed_out:
+                            stalled = True
+                            break
+                        pcm, dur = _chunk_to_bytes(chunk)
+                        total_sec += dur
+                        chunks += 1
+                        yield pcm
+
+                except Exception as e:
+                    logger.error("第 %d 段异常: %s", i + 1, e)
+                    continue
+
+                seg_elapsed = time.perf_counter() - seg_t0
+                if stalled:
+                    logger.warning(
+                        "第 %d 段截断 | chunks: %d | 耗时: %.2fs (stall > %ds)",
+                        i + 1,
+                        chunks,
+                        seg_elapsed,
+                        CHUNK_STALL_TIMEOUT,
                     )
                 else:
-                    # 默认 zero_shot 模式 + 预注册 id
-                    # 注意：prompt_text 必须与注册时完全一致（包含 prefix）
-                    seg_out = cosyvoice.inference_zero_shot(
-                        seg,
-                        V3_SYS_PREFIX + PROMPT_TEXT,
-                        PROMPT_WAV,
-                        zero_shot_spk_id="custom_speaker",
-                        stream=True,
-                        text_frontend=False,
+                    logger.info(
+                        "第 %d 段完成 | chunks: %d | 耗时: %.2fs",
+                        i + 1,
+                        chunks,
+                        seg_elapsed,
                     )
 
-                chunks = 0
-                stalled = False
-                for chunk, timed_out in _iter_with_timeout(
-                    seg_out, CHUNK_STALL_TIMEOUT
-                ):
-                    if timed_out:
-                        stalled = True
-                        break
-                    pcm, dur = _chunk_to_bytes(chunk)
-                    total_sec += dur
-                    chunks += 1
-                    yield pcm
-
-            except Exception as e:
-                logger.error("第 %d 段异常: %s", i + 1, e)
-                continue
-
-            seg_elapsed = time.perf_counter() - seg_t0
-            if stalled:
-                logger.warning(
-                    "第 %d 段截断 | chunks: %d | 耗时: %.2fs (stall > %ds)",
-                    i + 1,
-                    chunks,
-                    seg_elapsed,
-                    CHUNK_STALL_TIMEOUT,
-                )
-            else:
-                logger.info(
-                    "第 %d 段完成 | chunks: %d | 耗时: %.2fs",
-                    i + 1,
-                    chunks,
-                    seg_elapsed,
-                )
-
-        elapsed = time.perf_counter() - t0
-        logger.info(
-            "生成完成(complete) | 段数: %d | 音频: %.2fs | 总耗时: %.3fs | RTF: %.3f",
-            len(segments),
-            total_sec,
-            elapsed,
-            elapsed / total_sec if total_sec > 0 else 0,
-        )
+            elapsed = time.perf_counter() - t0
+            logger.info(
+                "生成完成(complete) | 段数: %d | 音频: %.2fs | 总耗时: %.3fs | RTF: %.3f",
+                len(segments),
+                total_sec,
+                elapsed,
+                elapsed / total_sec if total_sec > 0 else 0,
+            )
 
     return StreamingResponse(generate(), media_type="audio/wav")
 
@@ -422,6 +460,9 @@ async def health():
         "model_version": MODEL_VERSION,
         "sample_rate": sample_rate if ready else None,
         "enable_instruct": ENABLE_INSTRUCT,
+        "tts_concurrency": TTS_CONCURRENCY,
+        "max_text_chars": MAX_TEXT_CHARS,
+        "max_segments": MAX_SEGMENTS,
     }
 
 

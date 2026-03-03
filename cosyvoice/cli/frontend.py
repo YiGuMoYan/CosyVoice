@@ -50,6 +50,8 @@ class CosyVoiceFrontEnd:
             self.spk2info = torch.load(spk2info, map_location=self.device, weights_only=True)
         else:
             self.spk2info = {}
+        self.prompt_feature_cache = {}
+        self.prompt_cache_max_size = int(os.getenv("COSYVOICE_PROMPT_CACHE_SIZE", "16"))
         self.allowed_special = allowed_special
         self.inflect_parser = inflect.engine()
         # NOTE compatible when no text frontend tool is avaliable
@@ -74,6 +76,45 @@ class CosyVoiceFrontEnd:
                 self.text_frontend = ''
                 logging.info('no frontend is avaliable')
 
+    def _build_prompt_cache_key(self, prompt_wav, resample_rate):
+        if not isinstance(prompt_wav, str):
+            return None
+        if not os.path.exists(prompt_wav):
+            return None
+        stat = os.stat(prompt_wav)
+        return f"{os.path.abspath(prompt_wav)}:{stat.st_mtime_ns}:{resample_rate}"
+
+    def _clone_prompt_cache_item(self, item):
+        return {
+            "speech_feat": item["speech_feat"].detach().cpu().clone(),
+            "speech_feat_len": item["speech_feat_len"].detach().cpu().clone(),
+            "speech_token": item["speech_token"].detach().cpu().clone(),
+            "speech_token_len": item["speech_token_len"].detach().cpu().clone(),
+            "embedding": item["embedding"].detach().cpu().clone(),
+        }
+
+    def _get_cached_prompt_features(self, cache_key):
+        if cache_key is None:
+            return None
+        item = self.prompt_feature_cache.get(cache_key)
+        if item is None:
+            return None
+        cloned = self._clone_prompt_cache_item(item)
+        return {
+            "speech_feat": cloned["speech_feat"].to(self.device),
+            "speech_feat_len": cloned["speech_feat_len"].to(self.device),
+            "speech_token": cloned["speech_token"].to(self.device),
+            "speech_token_len": cloned["speech_token_len"].to(self.device),
+            "embedding": cloned["embedding"].to(self.device),
+        }
+
+    def _put_cached_prompt_features(self, cache_key, item):
+        if cache_key is None:
+            return
+        if len(self.prompt_feature_cache) >= self.prompt_cache_max_size and cache_key not in self.prompt_feature_cache:
+            oldest_key = next(iter(self.prompt_feature_cache))
+            self.prompt_feature_cache.pop(oldest_key, None)
+        self.prompt_feature_cache[cache_key] = self._clone_prompt_cache_item(item)
 
     def _extract_text_token(self, text):
         if isinstance(text, Generator):
@@ -169,14 +210,32 @@ class CosyVoiceFrontEnd:
         tts_text_token, tts_text_token_len = self._extract_text_token(tts_text)
         if zero_shot_spk_id == '':
             prompt_text_token, prompt_text_token_len = self._extract_text_token(prompt_text)
-            speech_feat, speech_feat_len = self._extract_speech_feat(prompt_wav)
-            speech_token, speech_token_len = self._extract_speech_token(prompt_wav)
+            cache_key = self._build_prompt_cache_key(prompt_wav, resample_rate)
+            cached = self._get_cached_prompt_features(cache_key)
+            if cached is not None:
+                speech_feat = cached["speech_feat"]
+                speech_feat_len = cached["speech_feat_len"]
+                speech_token = cached["speech_token"]
+                speech_token_len = cached["speech_token_len"]
+                embedding = cached["embedding"]
+            else:
+                speech_feat, speech_feat_len = self._extract_speech_feat(prompt_wav)
+                speech_token, speech_token_len = self._extract_speech_token(prompt_wav)
+                embedding = self._extract_spk_embedding(prompt_wav)
+                self._put_cached_prompt_features(cache_key, {
+                    "speech_feat": speech_feat,
+                    "speech_feat_len": speech_feat_len,
+                    "speech_token": speech_token,
+                    "speech_token_len": speech_token_len,
+                    "embedding": embedding,
+                })
             if resample_rate == 24000:
                 # cosyvoice2, force speech_feat % speech_token = 2
                 token_len = min(int(speech_feat.shape[1] / 2), speech_token.shape[1])
-                speech_feat, speech_feat_len[:] = speech_feat[:, :2 * token_len], 2 * token_len
-                speech_token, speech_token_len[:] = speech_token[:, :token_len], token_len
-            embedding = self._extract_spk_embedding(prompt_wav)
+                speech_feat = speech_feat[:, :2 * token_len]
+                speech_feat_len = torch.tensor([2 * token_len], dtype=torch.int32).to(self.device)
+                speech_token = speech_token[:, :token_len]
+                speech_token_len = torch.tensor([token_len], dtype=torch.int32).to(self.device)
             model_input = {'prompt_text': prompt_text_token, 'prompt_text_len': prompt_text_token_len,
                            'llm_prompt_speech_token': speech_token, 'llm_prompt_speech_token_len': speech_token_len,
                            'flow_prompt_speech_token': speech_token, 'flow_prompt_speech_token_len': speech_token_len,

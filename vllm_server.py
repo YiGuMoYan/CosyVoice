@@ -13,6 +13,7 @@ import logging
 import struct
 import queue
 import threading
+import os
 
 import numpy as np
 import torch._inductor.config  # noqa: F401
@@ -34,25 +35,26 @@ import uvicorn
 # ============================================================
 #  配置
 # ============================================================
-MODEL_VERSION = "v3"
+MODEL_VERSION = os.getenv("MODEL_VERSION", "v3")
 
 # v3 配置
 MODEL_CONFIG = {
-    "model_dir": "pretrained_models/Fun-CosyVoice3-0.5B",
-    "load_trt": False,
-    "fp16": False,
-    "load_vllm": True,
+    "model_dir": os.getenv("COSYVOICE_MODEL_DIR", "pretrained_models/Fun-CosyVoice3-0.5B"),
+    "load_trt": os.getenv("COSYVOICE_LOAD_TRT", "False").lower() == "true",
+    "fp16": os.getenv("COSYVOICE_FP16", "False").lower() == "true",
+    "load_vllm": os.getenv("COSYVOICE_LOAD_VLLM", "True").lower() == "true",
 }
 
 PROMPT_TEXT = "再用小部分白米饭和蓝米饭，做出天钿的耳机。唉，天钿，你去哪里，别跑啊。嗯，这次的演唱会是一场观众朋友们期待很久，我也期待很久的演唱会。为了这次久别重逢。"
-PROMPT_WAV = "raw/merged_prompt.wav"
+PROMPT_WAV = os.getenv("COSYVOICE_PROMPT_WAV", "raw/merged_prompt.wav")
 # v3 系统前缀（在所有文本前添加）
 V3_SYS_PREFIX = "You are a helpful assistant.<|endofprompt|>"
-PORT = 9880
+PORT = int(os.getenv("PORT", "9880"))
+ENABLE_INSTRUCT = os.getenv("COSYVOICE_ENABLE_INSTRUCT", "True").lower() == "true"
 
 # 单个 chunk 最大等待秒数，超过视为 LLM 跑飞，截断当前段并继续下一段
 # 由于每次都要处理音频特征，首字延迟可能较高，增加到 30 秒
-CHUNK_STALL_TIMEOUT = 30
+CHUNK_STALL_TIMEOUT = int(os.getenv("COSYVOICE_CHUNK_STALL_TIMEOUT", "30"))
 
 # ============================================================
 #  日志
@@ -322,7 +324,9 @@ async def tts_complete(req: TTSRequest):
     text = _normalize_chinese_num(text)
     text = _insert_breath(text)
 
-    mode = "instruct" if req.instruct else "zero_shot"
+    use_instruct = bool(req.instruct) and ENABLE_INSTRUCT and hasattr(cosyvoice, "inference_instruct2")
+    instruct_text = _ensure_instruct(req.instruct) if use_instruct else ""
+    mode = "instruct2" if use_instruct else "zero_shot"
     logger.info("收到请求(complete) | 模式: %s | 文本: %s", mode, text)
 
     segments = cosyvoice.frontend.text_normalize(text, split=True)
@@ -336,16 +340,26 @@ async def tts_complete(req: TTSRequest):
             logger.info("开始第 %d/%d 段: %s", i + 1, len(segments), seg)
 
             try:
-                # 统一使用 zero_shot 模式 + 预注册 id
-                # 注意：prompt_text 必须与注册时完全一致（包含 prefix）
-                seg_out = cosyvoice.inference_zero_shot(
-                    seg,
-                    V3_SYS_PREFIX + PROMPT_TEXT,
-                    PROMPT_WAV,
-                    zero_shot_spk_id="custom_speaker",
-                    stream=True,
-                    text_frontend=False,
-                )
+                if use_instruct:
+                    seg_out = cosyvoice.inference_instruct2(
+                        seg,
+                        instruct_text,
+                        PROMPT_WAV,
+                        zero_shot_spk_id="custom_speaker",
+                        stream=True,
+                        text_frontend=False,
+                    )
+                else:
+                    # 默认 zero_shot 模式 + 预注册 id
+                    # 注意：prompt_text 必须与注册时完全一致（包含 prefix）
+                    seg_out = cosyvoice.inference_zero_shot(
+                        seg,
+                        V3_SYS_PREFIX + PROMPT_TEXT,
+                        PROMPT_WAV,
+                        zero_shot_spk_id="custom_speaker",
+                        stream=True,
+                        text_frontend=False,
+                    )
 
                 chunks = 0
                 stalled = False
@@ -400,6 +414,16 @@ async def tts_complete(req: TTSRequest):
 async def get_sample_rate():
     return {"sample_rate": sample_rate}
 
+@app.get("/health")
+async def health():
+    ready = cosyvoice is not None
+    return {
+        "ready": ready,
+        "model_version": MODEL_VERSION,
+        "sample_rate": sample_rate if ready else None,
+        "enable_instruct": ENABLE_INSTRUCT,
+    }
+
 
 # ============================================================
 #  启动
@@ -417,7 +441,7 @@ if __name__ == "__main__":
     cosyvoice = AutoModel(
         model_dir=cfg["model_dir"],
         load_trt=cfg["load_trt"],
-        load_vllm=True,
+        load_vllm=cfg["load_vllm"],
         fp16=cfg["fp16"],
     )
 

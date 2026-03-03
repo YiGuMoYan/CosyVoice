@@ -19,9 +19,46 @@ import json
 import torch
 import torchaudio
 import logging
+from typing import Dict, Tuple
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s %(levelname)s %(message)s')
+
+_RESAMPLER_CACHE: Dict[Tuple[int, int], torch.nn.Module] = {}
+
+
+def _get_resampler(orig_sr: int, target_sr: int):
+    key = (orig_sr, target_sr)
+    if key not in _RESAMPLER_CACHE:
+        _RESAMPLER_CACHE[key] = torchaudio.transforms.Resample(
+            orig_freq=orig_sr, new_freq=target_sr
+        )
+    return _RESAMPLER_CACHE[key]
+
+
+def _trim_silence(speech: torch.Tensor, threshold: float, min_len: int = 1600):
+    if speech.numel() == 0:
+        return speech
+    mono = speech.abs().mean(dim=0)
+    active = torch.nonzero(mono > threshold, as_tuple=False).flatten()
+    if active.numel() == 0:
+        return speech
+    start = int(active[0].item())
+    end = int(active[-1].item()) + 1
+    trimmed = speech[:, start:end]
+    if trimmed.shape[1] < min_len:
+        return speech
+    return trimmed
+
+
+def _normalize_peak(speech: torch.Tensor, target_peak: float):
+    peak = speech.abs().max()
+    if peak <= 0:
+        return speech
+    scale = float(target_peak) / float(peak)
+    # prevent over-amplifying noisy clips
+    scale = min(scale, 3.0)
+    return speech * scale
 
 
 def read_lists(list_file):
@@ -44,9 +81,15 @@ def read_json_lists(list_file):
 def load_wav(wav, target_sr, min_sr=16000):
     speech, sample_rate = torchaudio.load(wav, backend='soundfile')
     speech = speech.mean(dim=0, keepdim=True)
+    if os.getenv("COSYVOICE_PROMPT_TRIM_SILENCE", "False").lower() == "true":
+        threshold = float(os.getenv("COSYVOICE_PROMPT_SILENCE_THRESHOLD", "0.01"))
+        speech = _trim_silence(speech, threshold=threshold)
+    if os.getenv("COSYVOICE_PROMPT_NORMALIZE_PEAK", "False").lower() == "true":
+        target_peak = float(os.getenv("COSYVOICE_PROMPT_TARGET_PEAK", "0.95"))
+        speech = _normalize_peak(speech, target_peak=target_peak)
     if sample_rate != target_sr:
-        assert sample_rate >= min_sr, 'wav sample rate {} must be greater than {}'.format(sample_rate, target_sr)
-        speech = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=target_sr)(speech)
+        assert sample_rate >= min_sr, 'wav sample rate {} must be greater than {}'.format(sample_rate, min_sr)
+        speech = _get_resampler(sample_rate, target_sr)(speech)
     return speech
 
 

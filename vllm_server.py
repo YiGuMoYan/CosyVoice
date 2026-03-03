@@ -221,6 +221,8 @@ def _general_num_to_chinese(m: re.Match) -> str:
 
 def _normalize_chinese_num(text: str) -> str:
     """将文本中的阿拉伯数字转为中文读法"""
+    if not re.search(r"\d", text):
+        return text
     # 年份：4位数字+年
     text = re.sub(r"(\d{4})年", _year_to_chinese, text)
     # 月/日
@@ -246,6 +248,8 @@ BREATH_MIN_CHARS = 15  # 逗号间隔超过此字数才插入气口
 
 def _insert_breath(text: str) -> str:
     """在较长的逗号分句之间插入 [breath] 标记"""
+    if "，" not in text and "," not in text:
+        return text
     parts = re.split(r"(，|,)", text)
     result = []
     char_count = 0
@@ -463,6 +467,11 @@ async def health():
         "tts_concurrency": TTS_CONCURRENCY,
         "max_text_chars": MAX_TEXT_CHARS,
         "max_segments": MAX_SEGMENTS,
+        "enable_text_clean": ENABLE_TEXT_CLEAN,
+        "enable_zh_num_normalize": ENABLE_ZH_NUM_NORMALIZE,
+        "enable_auto_breath": ENABLE_AUTO_BREATH,
+        "prompt_trim_silence": os.getenv("COSYVOICE_PROMPT_TRIM_SILENCE", "False"),
+        "prompt_normalize_peak": os.getenv("COSYVOICE_PROMPT_NORMALIZE_PEAK", "False"),
     }
 
 

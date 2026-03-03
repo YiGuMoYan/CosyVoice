@@ -168,14 +168,21 @@ def random_sampling(weighted_scores, decoded_tokens, sampling):
 
 
 def fade_in_out(fade_in_mel, fade_out_mel, window):
-    device = fade_in_mel.device
-    fade_in_mel, fade_out_mel = fade_in_mel.cpu(), fade_out_mel.cpu()
+    """
+    GPU-friendly overlap-add.
+    Previous implementation moved tensors to CPU every chunk, which hurts streaming latency.
+    """
     mel_overlap_len = int(window.shape[0] / 2)
-    if fade_in_mel.device == torch.device('cpu'):
-        fade_in_mel = fade_in_mel.clone()
-    fade_in_mel[..., :mel_overlap_len] = fade_in_mel[..., :mel_overlap_len] * window[:mel_overlap_len] + \
-        fade_out_mel[..., -mel_overlap_len:] * window[mel_overlap_len:]
-    return fade_in_mel.to(device)
+    if mel_overlap_len == 0:
+        return fade_in_mel
+
+    win = torch.as_tensor(window, dtype=fade_in_mel.dtype, device=fade_in_mel.device)
+    out = fade_in_mel.clone()
+    out[..., :mel_overlap_len] = (
+        out[..., :mel_overlap_len] * win[:mel_overlap_len]
+        + fade_out_mel[..., -mel_overlap_len:] * win[mel_overlap_len:]
+    )
+    return out
 
 
 def set_all_random_seed(seed):

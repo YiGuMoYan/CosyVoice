@@ -481,6 +481,12 @@ async def health():
         "enable_auto_breath": ENABLE_AUTO_BREATH,
         "prompt_trim_silence": os.getenv("COSYVOICE_PROMPT_TRIM_SILENCE", "False"),
         "prompt_normalize_peak": os.getenv("COSYVOICE_PROMPT_NORMALIZE_PEAK", "False"),
+        "token_hop_len": os.getenv("COSYVOICE_TOKEN_HOP_LEN", "25"),
+        "token_max_hop_factor": os.getenv("COSYVOICE_TOKEN_MAX_HOP_FACTOR", "4"),
+        "stream_scale_factor": os.getenv("COSYVOICE_STREAM_SCALE_FACTOR", "2"),
+        "vllm_top_p": os.getenv("COSYVOICE_VLLM_TOP_P", "0.8"),
+        "vllm_temperature": os.getenv("COSYVOICE_VLLM_TEMPERATURE", "1.0"),
+        "vllm_repetition_penalty": os.getenv("COSYVOICE_VLLM_REPETITION_PENALTY", "1.05"),
     }
 
 

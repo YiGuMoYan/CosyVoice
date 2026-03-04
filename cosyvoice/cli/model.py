@@ -54,7 +54,7 @@ class CosyVoiceModel:
         # speech fade in out
         self.speech_window = np.hamming(2 * self.source_cache_len)
         # rtf and decoding related
-        self.stream_scale_factor = 1
+        self.stream_scale_factor = float(os.getenv("COSYVOICE_STREAM_SCALE_FACTOR_BASE", "1"))
         assert (
             self.stream_scale_factor >= 1
         ), "stream_scale_factor should be greater than 1, change it according to your actual rtf"
@@ -421,10 +421,12 @@ class CosyVoice2Model(CosyVoiceModel):
         self.hift = hift
         self.fp16 = fp16
         # NOTE must matching training static_chunk_size
-        self.token_hop_len = 25
+        self.token_hop_len = int(os.getenv("COSYVOICE_TOKEN_HOP_LEN", "25"))
         # NOTE increase token_hop_len incrementally to avoid duplicate inference
-        self.token_max_hop_len = 4 * self.token_hop_len
-        self.stream_scale_factor = 2
+        self.token_max_hop_len = int(
+            max(self.token_hop_len, self.token_hop_len * float(os.getenv("COSYVOICE_TOKEN_MAX_HOP_FACTOR", "4")))
+        )
+        self.stream_scale_factor = float(os.getenv("COSYVOICE_STREAM_SCALE_FACTOR", "2"))
         assert (
             self.stream_scale_factor >= 1
         ), "stream_scale_factor should be greater than 1, change it according to your actual rtf"
@@ -686,10 +688,12 @@ class CosyVoice3Model(CosyVoice2Model):
         self.hift = hift
         self.fp16 = fp16
         # NOTE must matching training static_chunk_size
-        self.token_hop_len = 25
+        self.token_hop_len = int(os.getenv("COSYVOICE_TOKEN_HOP_LEN", "25"))
         # NOTE increase token_hop_len incrementally to avoid duplicate inference
-        self.token_max_hop_len = 4 * self.token_hop_len
-        self.stream_scale_factor = 2
+        self.token_max_hop_len = int(
+            max(self.token_hop_len, self.token_hop_len * float(os.getenv("COSYVOICE_TOKEN_MAX_HOP_FACTOR", "4")))
+        )
+        self.stream_scale_factor = float(os.getenv("COSYVOICE_STREAM_SCALE_FACTOR", "2"))
         assert (
             self.stream_scale_factor >= 1
         ), "stream_scale_factor should be greater than 1, change it according to your actual rtf"

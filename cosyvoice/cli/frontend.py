@@ -14,6 +14,7 @@
 from functools import partial
 from typing import Generator
 import json
+from collections import OrderedDict
 import onnxruntime
 import torch
 import numpy as np
@@ -50,7 +51,7 @@ class CosyVoiceFrontEnd:
             self.spk2info = torch.load(spk2info, map_location=self.device, weights_only=True)
         else:
             self.spk2info = {}
-        self.prompt_feature_cache = {}
+        self.prompt_feature_cache = OrderedDict()
         self.prompt_cache_max_size = int(os.getenv("COSYVOICE_PROMPT_CACHE_SIZE", "16"))
         self.prompt_max_seconds = float(os.getenv("COSYVOICE_PROMPT_MAX_SECONDS", "30"))
         self.allowed_special = allowed_special
@@ -100,6 +101,8 @@ class CosyVoiceFrontEnd:
         item = self.prompt_feature_cache.get(cache_key)
         if item is None:
             return None
+        # LRU: move recently used key to the end
+        self.prompt_feature_cache.move_to_end(cache_key)
         cloned = self._clone_prompt_cache_item(item)
         return {
             "speech_feat": cloned["speech_feat"].to(self.device),
@@ -112,9 +115,10 @@ class CosyVoiceFrontEnd:
     def _put_cached_prompt_features(self, cache_key, item):
         if cache_key is None:
             return
-        if len(self.prompt_feature_cache) >= self.prompt_cache_max_size and cache_key not in self.prompt_feature_cache:
-            oldest_key = next(iter(self.prompt_feature_cache))
-            self.prompt_feature_cache.pop(oldest_key, None)
+        if cache_key in self.prompt_feature_cache:
+            self.prompt_feature_cache.move_to_end(cache_key)
+        elif len(self.prompt_feature_cache) >= self.prompt_cache_max_size:
+            self.prompt_feature_cache.popitem(last=False)
         self.prompt_feature_cache[cache_key] = self._clone_prompt_cache_item(item)
 
     def _extract_text_token(self, text):

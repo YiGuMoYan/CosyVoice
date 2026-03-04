@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 
 import torch
@@ -29,6 +30,8 @@ SPEED = 1.0
 LOAD_VLLM = True
 LOAD_TRT = False
 FP16 = False
+INSTRUCT2_KEEP_LLM_PROMPT_SPEECH = True
+REFINE_INSTRUCT2_WITH_VC = True
 # --------------------------------------------------------------------
 
 
@@ -64,6 +67,9 @@ def collect_wav_from_iterator(iterator) -> torch.Tensor:
 def main() -> None:
     project_root = Path(__file__).resolve().parent
     prepare_import_path(project_root)
+    os.environ["COSYVOICE_INSTRUCT2_KEEP_LLM_PROMPT_SPEECH"] = (
+        "True" if INSTRUCT2_KEEP_LLM_PROMPT_SPEECH else "False"
+    )
 
     if LOAD_VLLM:
         prepare_vllm_registry()
@@ -106,9 +112,25 @@ def main() -> None:
         text_frontend=TEXT_FRONTEND,
     )
     instruct_wav = collect_wav_from_iterator(instruct_iter)
-    instruct_path = out_dir / "quick_instruct2.wav"
-    torchaudio.save(str(instruct_path), instruct_wav, cosyvoice.sample_rate)
-    print(f"done: {instruct_path}")
+    instruct_raw_path = out_dir / "quick_instruct2_raw.wav"
+    torchaudio.save(str(instruct_raw_path), instruct_wav, cosyvoice.sample_rate)
+    print(f"done: {instruct_raw_path}")
+
+    if REFINE_INSTRUCT2_WITH_VC:
+        vc_iter = cosyvoice.inference_vc(
+            str(instruct_raw_path),
+            prompt_wav,
+            stream=STREAM,
+            speed=SPEED,
+        )
+        refined_wav = collect_wav_from_iterator(vc_iter)
+        instruct_path = out_dir / "quick_instruct2.wav"
+        torchaudio.save(str(instruct_path), refined_wav, cosyvoice.sample_rate)
+        print(f"done: {instruct_path}")
+    else:
+        instruct_path = out_dir / "quick_instruct2.wav"
+        torchaudio.save(str(instruct_path), instruct_wav, cosyvoice.sample_rate)
+        print(f"done: {instruct_path}")
 
 
 if __name__ == "__main__":

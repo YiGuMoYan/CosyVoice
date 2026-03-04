@@ -281,8 +281,10 @@ class CosyVoiceFrontEnd:
 
     def frontend_instruct2(self, tts_text, instruct_text, prompt_wav, resample_rate, zero_shot_spk_id):
         model_input = self.frontend_zero_shot(tts_text, instruct_text, prompt_wav, resample_rate, zero_shot_spk_id)
-        del model_input['llm_prompt_speech_token']
-        del model_input['llm_prompt_speech_token_len']
+        keep_llm_prompt_speech = os.getenv("COSYVOICE_INSTRUCT2_KEEP_LLM_PROMPT_SPEECH", "False").lower() == "true"
+        if not keep_llm_prompt_speech:
+            del model_input['llm_prompt_speech_token']
+            del model_input['llm_prompt_speech_token_len']
         return model_input
 
     def frontend_vc(self, source_speech_16k, prompt_wav, resample_rate):

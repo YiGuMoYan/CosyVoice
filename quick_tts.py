@@ -48,7 +48,7 @@ INSTRUCT2_CANDIDATES = [
     {"name": "c3", "keep": True, "anchor": "prompt_then_instruct", "vc_passes": 1, "instruct_override": "<|endofprompt|>"},
     {"name": "c4", "keep": False, "anchor": "instruct_only", "vc_passes": 0, "instruct_override": "<|endofprompt|>"},
 ]
-FALLBACK_TO_ZERO_SHOT_ON_LEAK = True
+FALLBACK_TO_INSTRUCT2_RETRY_ON_FAIL = True
 FALLBACK_SIM_THRESHOLD = 0.55
 FINAL_STRICT_VERIFY = True
 FINAL_SIM_THRESHOLD = 0.70
@@ -184,6 +184,17 @@ def run_instruct2_candidate(cosyvoice, prompt_wav: str, out_dir: Path, cfg: dict
     return final_wav, final_path, raw_path
 
 
+def run_instruct2_retry(cosyvoice, prompt_wav: str, out_dir: Path, name: str):
+    retry_cfg = {
+        "name": name,
+        "keep": False,
+        "anchor": "instruct_only",
+        "vc_passes": 0,
+        "instruct_override": "<|endofprompt|>",
+    }
+    return run_instruct2_candidate(cosyvoice, prompt_wav, out_dir, retry_cfg)
+
+
 def main() -> None:
     project_root = Path(__file__).resolve().parent
     prepare_import_path(project_root)
@@ -284,25 +295,19 @@ def main() -> None:
     print(f"done: {instruct_raw_path}")
 
     instruct_path = out_dir / "quick_instruct2.wav"
-    should_fallback = FALLBACK_TO_ZERO_SHOT_ON_LEAK and (
+    should_fallback = FALLBACK_TO_INSTRUCT2_RETRY_ON_FAIL and (
         picked["leak"] or picked["sim"] < FALLBACK_SIM_THRESHOLD
     )
     if should_fallback:
         print(
             "fallback: picked instruct2 candidate has leakage/low similarity, "
-            "resynthesizing target text via zero_shot for stable content."
+            "retrying instruct2-only strict path."
         )
-        repair_iter = cosyvoice.inference_zero_shot(
-            INSTRUCT2_TEXT,
-            PROMPT_TEXT,
-            prompt_wav,
-            zero_shot_spk_id=ZERO_SHOT_SPK_ID,
-            stream=STREAM,
-            speed=SPEED,
-            text_frontend=TEXT_FRONTEND,
+        retry_wav, retry_final_path, retry_raw_path = run_instruct2_retry(
+            cosyvoice, prompt_wav, out_dir, "retry1"
         )
-        repair_wav = collect_wav_from_iterator(repair_iter)
-        torchaudio.save(str(instruct_path), repair_wav, cosyvoice.sample_rate)
+        shutil.copyfile(str(retry_raw_path), str(instruct_raw_path))
+        shutil.copyfile(str(retry_final_path), str(instruct_path))
     else:
         shutil.copyfile(str(picked["final_path"]), str(instruct_path))
 
@@ -311,19 +316,19 @@ def main() -> None:
         final_sim = text_similarity(final_asr, INSTRUCT2_TEXT)
         final_leak = has_leak_phrase(final_asr)
         print(f"final verify: sim={final_sim:.4f} leak={final_leak} asr='{final_asr}'")
-        if final_leak or final_sim < FINAL_SIM_THRESHOLD:
-            print("final fallback: force zero_shot synthesis to guarantee clean content.")
-            repair_iter = cosyvoice.inference_zero_shot(
-                INSTRUCT2_TEXT,
-                PROMPT_TEXT,
-                prompt_wav,
-                zero_shot_spk_id=ZERO_SHOT_SPK_ID,
-                stream=STREAM,
-                speed=SPEED,
-                text_frontend=TEXT_FRONTEND,
+        if FALLBACK_TO_INSTRUCT2_RETRY_ON_FAIL and (final_leak or final_sim < FINAL_SIM_THRESHOLD):
+            print("final fallback: retrying instruct2 strict path (second attempt).")
+            retry_wav, retry_final_path, retry_raw_path = run_instruct2_retry(
+                cosyvoice, prompt_wav, out_dir, "retry2"
             )
-            repair_wav = collect_wav_from_iterator(repair_iter)
-            torchaudio.save(str(instruct_path), repair_wav, cosyvoice.sample_rate)
+            shutil.copyfile(str(retry_raw_path), str(instruct_raw_path))
+            shutil.copyfile(str(retry_final_path), str(instruct_path))
+            final_asr = transcribe_with_whisper(asr_model, instruct_path)
+            final_sim = text_similarity(final_asr, INSTRUCT2_TEXT)
+            final_leak = has_leak_phrase(final_asr)
+            print(f"final verify 2: sim={final_sim:.4f} leak={final_leak} asr='{final_asr}'")
+            if final_leak or final_sim < FINAL_SIM_THRESHOLD:
+                raise RuntimeError("instruct2 final verification failed after strict retries; no zero_shot fallback used.")
     print(f"done: {instruct_path}")
 
 

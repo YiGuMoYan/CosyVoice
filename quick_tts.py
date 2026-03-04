@@ -2,14 +2,15 @@ import sys
 from pathlib import Path
 
 import torch
+import torch._inductor.config  # noqa: F401
 import torchaudio
 
 
 # -------------------- Quick Config (no CLI args) --------------------
 MODEL_DIR = "pretrained_models/Fun-CosyVoice3-0.5B"
 PROMPT_WAV = "raw/merged_prompt.wav"
-PROMPT_TEXT = "You are a helpful assistant.<|endofprompt|>你好，我是洛天依，很高兴认识大家。"
-TTS_TEXT = "你好，这是一条本地直连的快速语音合成测试。"
+PROMPT_TEXT = "You are a helpful assistant.<|endofprompt|>Hello, nice to meet you."
+TTS_TEXT = "This is a zero-argument local TTS test based on vllm_example."
 OUTPUT_WAV = "output/quick_tts.wav"
 
 USE_INSTRUCT2 = False
@@ -18,19 +19,33 @@ ZERO_SHOT_SPK_ID = ""
 STREAM = False
 TEXT_FRONTEND = True
 
-LOAD_VLLM = False
+LOAD_VLLM = True
 LOAD_TRT = False
 FP16 = False
 # --------------------------------------------------------------------
 
 
-def main() -> None:
-    project_root = Path(__file__).resolve().parent
+def prepare_import_path(project_root: Path) -> None:
     matcha_dir = project_root / "third_party" / "Matcha-TTS"
     if str(matcha_dir) not in sys.path:
         sys.path.insert(0, str(matcha_dir))
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
+
+
+def prepare_vllm_registry() -> None:
+    from vllm import ModelRegistry
+    from cosyvoice.vllm.cosyvoice2 import CosyVoice2ForCausalLM
+
+    ModelRegistry.register_model("CosyVoice2ForCausalLM", CosyVoice2ForCausalLM)
+
+
+def main() -> None:
+    project_root = Path(__file__).resolve().parent
+    prepare_import_path(project_root)
+
+    if LOAD_VLLM:
+        prepare_vllm_registry()
 
     from cosyvoice.cli.cosyvoice import AutoModel
 

@@ -11,13 +11,19 @@ MODEL_DIR = "pretrained_models/Fun-CosyVoice3-0.5B"
 PROMPT_WAV = "raw/merged_prompt.wav"
 OUTPUT_DIR = "output"
 
-ZERO_SHOT_TEXT = "你好，这里是 zero_shot 合成测试。"
-PROMPT_TEXT = "You are a helpful assistant.<|endofprompt|>你好，我是洛天依，很高兴认识大家。"
+PROMPT_TEXT = (
+    "You are a helpful assistant.<|endofprompt|>"
+    "Hello, I am Luo Tianyi. Nice to meet everyone."
+)
 
-INSTRUCT2_TEXT = "你好，这里是 instruct2 合成测试。"
-INSTRUCT_TEXT = "You are a helpful assistant.<|endofprompt|>"
-
+ZERO_SHOT_TEXT = "Hello, this is the zero-shot synthesis test."
+INSTRUCT2_TEXT = "Hello, this is the instruct2 synthesis test."
+INSTRUCT_TEXT = (
+    "Please keep exactly the same speaker timbre as the prompt audio. "
+    "Do not change persona, role, accent, or age. Read naturally.<|endofprompt|>"
+)
 ZERO_SHOT_SPK_ID = ""
+
 STREAM = False
 TEXT_FRONTEND = True
 SPEED = 1.0
@@ -43,7 +49,7 @@ def prepare_vllm_registry() -> None:
     ModelRegistry.register_model("CosyVoice2ForCausalLM", CosyVoice2ForCausalLM)
 
 
-def collect_wav_from_iterator(iterator, sample_rate: int) -> torch.Tensor:
+def collect_wav_from_iterator(iterator) -> torch.Tensor:
     chunks = []
     for item in iterator:
         speech = item.get("tts_speech")
@@ -87,7 +93,7 @@ def main() -> None:
         speed=SPEED,
         text_frontend=TEXT_FRONTEND,
     )
-    zero_wav = collect_wav_from_iterator(zero_iter, cosyvoice.sample_rate)
+    zero_wav = collect_wav_from_iterator(zero_iter)
     zero_path = out_dir / "quick_zero_shot.wav"
     torchaudio.save(str(zero_path), zero_wav, cosyvoice.sample_rate)
     print(f"done: {zero_path}")
@@ -101,7 +107,7 @@ def main() -> None:
         speed=SPEED,
         text_frontend=TEXT_FRONTEND,
     )
-    instruct_wav = collect_wav_from_iterator(instruct_iter, cosyvoice.sample_rate)
+    instruct_wav = collect_wav_from_iterator(instruct_iter)
     instruct_path = out_dir / "quick_instruct2.wav"
     torchaudio.save(str(instruct_path), instruct_wav, cosyvoice.sample_rate)
     print(f"done: {instruct_path}")

@@ -43,13 +43,13 @@ MIN_AUDIO_PEAK = 0.02
 USE_ASR_SCORING = True
 ASR_MODEL_NAME = "tiny"
 INSTRUCT2_CANDIDATES = [
-    {"name": "c1", "keep": True, "anchor": "prompt_only", "vc_passes": 1},
-    {"name": "c2", "keep": True, "anchor": "prompt_then_instruct", "vc_passes": 1},
-    {"name": "c3", "keep": False, "anchor": "instruct_only", "vc_passes": 1},
-    {"name": "c4", "keep": False, "anchor": "instruct_only", "vc_passes": 0},
-    {"name": "c5", "keep": True, "anchor": "prompt_only", "vc_passes": 1, "instruct_override": "<|endofprompt|>"},
-    {"name": "c6", "keep": True, "anchor": "prompt_only", "vc_passes": 1, "instruct_override": "请保持当前音色。<|endofprompt|>"},
+    {"name": "c1", "keep": True, "anchor": "prompt_only", "vc_passes": 1, "instruct_override": "<|endofprompt|>"},
+    {"name": "c2", "keep": False, "anchor": "instruct_only", "vc_passes": 1, "instruct_override": "<|endofprompt|>"},
+    {"name": "c3", "keep": True, "anchor": "prompt_then_instruct", "vc_passes": 1, "instruct_override": "保持原音色。<|endofprompt|>"},
+    {"name": "c4", "keep": False, "anchor": "instruct_only", "vc_passes": 0, "instruct_override": "保持原音色。<|endofprompt|>"},
 ]
+FALLBACK_TO_ZERO_SHOT_ON_LEAK = True
+FALLBACK_SIM_THRESHOLD = 0.55
 LEAK_PHRASES = [
     "请保持与提示音完全一致的音色与语气",
     "不要读出系统提示",
@@ -130,13 +130,19 @@ def transcribe_with_whisper(model, wav_path: Path) -> str:
 
 
 def has_leak_phrase(text: str) -> bool:
-    return any(p in text for p in LEAK_PHRASES)
+    if any(p in text for p in LEAK_PHRASES):
+        return True
+    norm = normalize_text(text)
+    leak_keywords = ["系统提示", "提示音", "一致", "音色", "语气"]
+    hit = sum(1 for k in leak_keywords if normalize_text(k) in norm)
+    return hit >= 2
 
 
 def run_instruct2_candidate(cosyvoice, prompt_wav: str, out_dir: Path, cfg: dict):
     os.environ["COSYVOICE_INSTRUCT2_KEEP_LLM_PROMPT_SPEECH"] = "True" if cfg["keep"] else "False"
     os.environ["COSYVOICE_INSTRUCT2_ANCHOR_MODE"] = cfg["anchor"]
     os.environ["COSYVOICE_INSTRUCT2_STRIP_SYSTEM_PREFIX"] = "True"
+    os.environ["COSYVOICE_INSTRUCT2_SYSTEM_PROMPT"] = "You are a helpful assistant."
 
     instruct_iter = cosyvoice.inference_instruct2(
         INSTRUCT2_TEXT,
@@ -273,7 +279,27 @@ def main() -> None:
     print(f"done: {instruct_raw_path}")
 
     instruct_path = out_dir / "quick_instruct2.wav"
-    shutil.copyfile(str(picked["final_path"]), str(instruct_path))
+    should_fallback = FALLBACK_TO_ZERO_SHOT_ON_LEAK and (
+        picked["leak"] or picked["sim"] < FALLBACK_SIM_THRESHOLD
+    )
+    if should_fallback:
+        print(
+            "fallback: picked instruct2 candidate has leakage/low similarity, "
+            "resynthesizing target text via zero_shot for stable content."
+        )
+        repair_iter = cosyvoice.inference_zero_shot(
+            INSTRUCT2_TEXT,
+            PROMPT_TEXT,
+            prompt_wav,
+            zero_shot_spk_id=ZERO_SHOT_SPK_ID,
+            stream=STREAM,
+            speed=SPEED,
+            text_frontend=TEXT_FRONTEND,
+        )
+        repair_wav = collect_wav_from_iterator(repair_iter)
+        torchaudio.save(str(instruct_path), repair_wav, cosyvoice.sample_rate)
+    else:
+        shutil.copyfile(str(picked["final_path"]), str(instruct_path))
     print(f"done: {instruct_path}")
 
 

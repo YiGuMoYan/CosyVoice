@@ -293,6 +293,9 @@ class CosyVoiceFrontEnd:
                 llm_prompt_text = '{}{}'.format(instruct_text, anchor_prompt_text)
             elif anchor_mode == "prompt_then_instruct":
                 llm_prompt_text = '{}{}'.format(anchor_prompt_text, instruct_text)
+        if "<|endofprompt|>" not in llm_prompt_text:
+            system_prompt = os.getenv("COSYVOICE_INSTRUCT2_SYSTEM_PROMPT", "You are a helpful assistant.")
+            llm_prompt_text = "{}<|endofprompt|>{}".format(system_prompt, llm_prompt_text)
         model_input = self.frontend_zero_shot(tts_text, llm_prompt_text, prompt_wav, resample_rate, zero_shot_spk_id)
         keep_llm_prompt_speech = os.getenv("COSYVOICE_INSTRUCT2_KEEP_LLM_PROMPT_SPEECH", "False").lower() == "true"
         if not keep_llm_prompt_speech:

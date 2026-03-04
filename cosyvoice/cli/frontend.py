@@ -52,6 +52,7 @@ class CosyVoiceFrontEnd:
             self.spk2info = {}
         self.prompt_feature_cache = {}
         self.prompt_cache_max_size = int(os.getenv("COSYVOICE_PROMPT_CACHE_SIZE", "16"))
+        self.prompt_max_seconds = float(os.getenv("COSYVOICE_PROMPT_MAX_SECONDS", "30"))
         self.allowed_special = allowed_special
         self.inflect_parser = inflect.engine()
         # NOTE compatible when no text frontend tool is avaliable
@@ -135,7 +136,10 @@ class CosyVoiceFrontEnd:
 
     def _extract_speech_token(self, prompt_wav):
         speech = load_wav(prompt_wav, 16000)
-        assert speech.shape[1] / 16000 <= 30, 'do not support extract speech token for audio longer than 30s'
+        max_samples = int(self.prompt_max_seconds * 16000)
+        if speech.shape[1] > max_samples:
+            speech = speech[:, :max_samples]
+            logging.warning('prompt wav too long, cropped to %.1fs for speech token extraction', self.prompt_max_seconds)
         feat = whisper.log_mel_spectrogram(speech, n_mels=128)
         speech_token = self.speech_tokenizer_session.run(None,
                                                          {self.speech_tokenizer_session.get_inputs()[0].name:
@@ -148,6 +152,9 @@ class CosyVoiceFrontEnd:
 
     def _extract_spk_embedding(self, prompt_wav):
         speech = load_wav(prompt_wav, 16000)
+        max_samples = int(self.prompt_max_seconds * 16000)
+        if speech.shape[1] > max_samples:
+            speech = speech[:, :max_samples]
         feat = kaldi.fbank(speech,
                            num_mel_bins=80,
                            dither=0,
@@ -160,6 +167,9 @@ class CosyVoiceFrontEnd:
 
     def _extract_speech_feat(self, prompt_wav):
         speech = load_wav(prompt_wav, 24000)
+        max_samples = int(self.prompt_max_seconds * 24000)
+        if speech.shape[1] > max_samples:
+            speech = speech[:, :max_samples]
         speech_feat = self.feat_extractor(speech).squeeze(dim=0).transpose(0, 1).to(self.device)
         speech_feat = speech_feat.unsqueeze(dim=0)
         speech_feat_len = torch.tensor([speech_feat.shape[1]], dtype=torch.int32).to(self.device)

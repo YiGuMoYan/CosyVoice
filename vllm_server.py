@@ -16,6 +16,7 @@ import threading
 import os
 
 import numpy as np
+import torch
 import torch._inductor.config  # noqa: F401
 
 sys.path.append("third_party/Matcha-TTS")
@@ -71,6 +72,14 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("tts-server")
+
+# GPU math optimization switches (safe defaults for inference)
+if torch.cuda.is_available():
+    if os.getenv("COSYVOICE_ENABLE_TF32", "True").lower() == "true":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    if os.getenv("COSYVOICE_CUDNN_BENCHMARK", "True").lower() == "true":
+        torch.backends.cudnn.benchmark = True
 
 # ============================================================
 #  全局状态（在 __main__ 中初始化）

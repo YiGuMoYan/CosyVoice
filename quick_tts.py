@@ -1,6 +1,8 @@
 import sys
 import os
 import shutil
+import re
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import torch
@@ -38,11 +40,21 @@ INSTRUCT2_ANCHOR_MODE = "prompt_only"
 MIN_AUDIO_SEC = 1.0
 MIN_AUDIO_RMS = 0.003
 MIN_AUDIO_PEAK = 0.02
+USE_ASR_SCORING = True
+ASR_MODEL_NAME = "tiny"
 INSTRUCT2_CANDIDATES = [
     {"name": "c1", "keep": True, "anchor": "prompt_only", "vc_passes": 1},
     {"name": "c2", "keep": True, "anchor": "prompt_then_instruct", "vc_passes": 1},
     {"name": "c3", "keep": False, "anchor": "instruct_only", "vc_passes": 1},
     {"name": "c4", "keep": False, "anchor": "instruct_only", "vc_passes": 0},
+    {"name": "c5", "keep": True, "anchor": "prompt_only", "vc_passes": 1, "instruct_override": "<|endofprompt|>"},
+    {"name": "c6", "keep": True, "anchor": "prompt_only", "vc_passes": 1, "instruct_override": "请保持当前音色。<|endofprompt|>"},
+]
+LEAK_PHRASES = [
+    "请保持与提示音完全一致的音色与语气",
+    "不要读出系统提示",
+    "系统提示",
+    "音色与语气",
 ]
 # --------------------------------------------------------------------
 
@@ -94,6 +106,33 @@ def quality_score(wav: torch.Tensor, sample_rate: int) -> float:
     return duration * (rms + 1e-4) * (peak + 1e-4)
 
 
+def normalize_text(text: str) -> str:
+    text = text.lower()
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[^\w\u4e00-\u9fff]", "", text)
+    return text
+
+
+def text_similarity(a: str, b: str) -> float:
+    na = normalize_text(a)
+    nb = normalize_text(b)
+    if not na or not nb:
+        return 0.0
+    return float(SequenceMatcher(None, na, nb).ratio())
+
+
+def transcribe_with_whisper(model, wav_path: Path) -> str:
+    try:
+        result = model.transcribe(str(wav_path), language="zh")
+        return (result.get("text") or "").strip()
+    except Exception:
+        return ""
+
+
+def has_leak_phrase(text: str) -> bool:
+    return any(p in text for p in LEAK_PHRASES)
+
+
 def run_instruct2_candidate(cosyvoice, prompt_wav: str, out_dir: Path, cfg: dict):
     os.environ["COSYVOICE_INSTRUCT2_KEEP_LLM_PROMPT_SPEECH"] = "True" if cfg["keep"] else "False"
     os.environ["COSYVOICE_INSTRUCT2_ANCHOR_MODE"] = cfg["anchor"]
@@ -101,7 +140,7 @@ def run_instruct2_candidate(cosyvoice, prompt_wav: str, out_dir: Path, cfg: dict
 
     instruct_iter = cosyvoice.inference_instruct2(
         INSTRUCT2_TEXT,
-        INSTRUCT_TEXT,
+        cfg.get("instruct_override", INSTRUCT_TEXT),
         prompt_wav,
         zero_shot_spk_id=ZERO_SHOT_SPK_ID,
         stream=STREAM,
@@ -169,6 +208,16 @@ def main() -> None:
     torchaudio.save(str(zero_path), zero_wav, cosyvoice.sample_rate)
     print(f"done: {zero_path}")
 
+    asr_model = None
+    if USE_ASR_SCORING:
+        try:
+            import whisper
+
+            asr_model = whisper.load_model(ASR_MODEL_NAME)
+            print(f"asr model loaded: {ASR_MODEL_NAME}")
+        except Exception as e:
+            print(f"asr disabled: {e}")
+
     candidates = []
     for cfg in INSTRUCT2_CANDIDATES:
         try:
@@ -176,9 +225,20 @@ def main() -> None:
             bad = is_bad_audio(wav, cosyvoice.sample_rate)
             score = quality_score(wav, cosyvoice.sample_rate)
             duration, rms, peak = audio_stats(wav, cosyvoice.sample_rate)
+            asr_text = ""
+            sim = 0.0
+            leak = False
+            if asr_model is not None:
+                asr_text = transcribe_with_whisper(asr_model, final_path)
+                sim = text_similarity(asr_text, INSTRUCT2_TEXT)
+                leak = has_leak_phrase(asr_text)
+            joint = score * (0.2 + sim)
+            if leak:
+                joint *= 0.2
             print(
                 f"candidate={cfg['name']} bad={bad} score={score:.6f} "
-                f"dur={duration:.3f}s rms={rms:.6f} peak={peak:.6f}"
+                f"dur={duration:.3f}s rms={rms:.6f} peak={peak:.6f} "
+                f"sim={sim:.4f} leak={leak} asr='{asr_text}'"
             )
             candidates.append(
                 {
@@ -188,6 +248,9 @@ def main() -> None:
                     "raw_path": raw_path,
                     "bad": bad,
                     "score": score,
+                    "sim": sim,
+                    "leak": leak,
+                    "joint": joint,
                 }
             )
         except Exception as e:
@@ -197,7 +260,13 @@ def main() -> None:
         raise RuntimeError("All instruct2 candidates failed.")
 
     good = [x for x in candidates if not x["bad"]]
-    picked = max(good if good else candidates, key=lambda x: x["score"])
+    strong = [x for x in good if (x["sim"] >= 0.60 and not x["leak"])]
+    pool = strong if strong else (good if good else candidates)
+    picked = max(pool, key=lambda x: x["joint"])
+    print(
+        f"picked={picked['cfg']['name']} "
+        f"sim={picked['sim']:.4f} leak={picked['leak']} joint={picked['joint']:.6f}"
+    )
 
     instruct_raw_path = out_dir / "quick_instruct2_raw.wav"
     shutil.copyfile(str(picked["raw_path"]), str(instruct_raw_path))

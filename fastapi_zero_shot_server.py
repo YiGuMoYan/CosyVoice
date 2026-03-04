@@ -4,7 +4,7 @@ import struct
 import sys
 import threading
 import wave
-from typing import Generator, Optional
+from typing import Generator
 
 import numpy as np
 import torch
@@ -16,11 +16,6 @@ from pydantic import BaseModel
 
 
 sys.path.append("third_party/Matcha-TTS")
-
-from vllm import ModelRegistry
-from cosyvoice.vllm.cosyvoice2 import CosyVoice2ForCausalLM
-
-ModelRegistry.register_model("CosyVoice2ForCausalLM", CosyVoice2ForCausalLM)
 
 from cosyvoice.cli.cosyvoice import AutoModel
 
@@ -41,12 +36,14 @@ TTS_CONCURRENCY = int(os.getenv("COSYVOICE_TTS_CONCURRENCY", "1"))
 MODEL_LOAD_TRT = os.getenv("COSYVOICE_LOAD_TRT", "False").lower() == "true"
 MODEL_LOAD_VLLM = os.getenv("COSYVOICE_LOAD_VLLM", "True").lower() == "true"
 MODEL_FP16 = os.getenv("COSYVOICE_FP16", "False").lower() == "true"
+ALLOW_VLLM_FALLBACK = os.getenv("COSYVOICE_ALLOW_VLLM_FALLBACK", "True").lower() == "true"
 
 
 app = FastAPI(title="CosyVoice ZeroShot FastAPI")
 cosyvoice = None
 sample_rate = 24000
 tts_semaphore = threading.Semaphore(max(1, TTS_CONCURRENCY))
+load_vllm_used = MODEL_LOAD_VLLM
 
 
 class TTSRequest(BaseModel):
@@ -106,6 +103,13 @@ def normalize_segments(text: str, split_text: bool, text_frontend: bool):
     if not split_text:
         return [text]
     return cosyvoice.frontend.text_normalize(text, split=True, text_frontend=text_frontend)
+
+
+def setup_vllm_registry() -> None:
+    from vllm import ModelRegistry
+    from cosyvoice.vllm.cosyvoice2 import CosyVoice2ForCausalLM
+
+    ModelRegistry.register_model("CosyVoice2ForCausalLM", CosyVoice2ForCausalLM)
 
 
 def run_zero_shot_segment(seg: str, speed: float, stream: bool, text_frontend: bool):
@@ -186,16 +190,27 @@ async def health():
         "sample_rate": sample_rate if cosyvoice is not None else None,
         "mode": "zero_shot_only",
         "speaker_id": SPEAKER_ID,
+        "load_vllm": load_vllm_used,
     }
 
 
 @app.on_event("startup")
 def startup_load_model():
-    global cosyvoice, sample_rate
+    global cosyvoice, sample_rate, load_vllm_used
+    load_vllm_used = MODEL_LOAD_VLLM
+    if load_vllm_used:
+        try:
+            setup_vllm_registry()
+        except Exception as e:
+            if not ALLOW_VLLM_FALLBACK:
+                raise RuntimeError(f"vLLM setup failed and fallback disabled: {e}") from e
+            print(f"[warn] vLLM setup failed, fallback to non-vLLM mode: {e}")
+            load_vllm_used = False
+
     cosyvoice = AutoModel(
         model_dir=MODEL_DIR,
         load_trt=MODEL_LOAD_TRT,
-        load_vllm=MODEL_LOAD_VLLM,
+        load_vllm=load_vllm_used,
         fp16=MODEL_FP16,
     )
     # Pre-register speaker id.

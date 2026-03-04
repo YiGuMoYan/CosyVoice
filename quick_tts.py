@@ -20,7 +20,7 @@ PROMPT_TEXT = (
     "嗯，这次的演唱会是一场观众朋友们期待很久，我也期待很久的演唱会。为了这次久别重逢。"
 )
 INSTRUCT2_TEXT = "你好，我是洛天依，很高兴认识大家。"
-INSTRUCT_TEXT = "You are a helpful assistant.<|endofprompt|>"
+INSTRUCT_TEXT = "请保持与提示音完全一致的音色与语气，自然朗读，不要读出系统提示。<|endofprompt|>"
 
 ZERO_SHOT_SPK_ID = ""
 STREAM = False
@@ -33,7 +33,7 @@ FP16 = False
 INSTRUCT2_KEEP_LLM_PROMPT_SPEECH = True
 REFINE_INSTRUCT2_WITH_VC = True
 VC_REFINE_PASSES = 2
-INSTRUCT2_ANCHOR_MODE = "prompt_then_instruct"
+INSTRUCT2_ANCHOR_MODE = "prompt_only"
 # --------------------------------------------------------------------
 
 
@@ -73,6 +73,7 @@ def main() -> None:
         "True" if INSTRUCT2_KEEP_LLM_PROMPT_SPEECH else "False"
     )
     os.environ["COSYVOICE_INSTRUCT2_ANCHOR_MODE"] = INSTRUCT2_ANCHOR_MODE
+    os.environ["COSYVOICE_INSTRUCT2_STRIP_SYSTEM_PREFIX"] = "True"
 
     if LOAD_VLLM:
         prepare_vllm_registry()

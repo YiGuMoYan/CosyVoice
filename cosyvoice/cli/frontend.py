@@ -283,12 +283,16 @@ class CosyVoiceFrontEnd:
         anchor_mode = os.getenv("COSYVOICE_INSTRUCT2_ANCHOR_MODE", "instruct_only").lower()
         llm_prompt_text = instruct_text
         if prompt_text != '':
+            anchor_prompt_text = prompt_text
+            strip_system_prefix = os.getenv("COSYVOICE_INSTRUCT2_STRIP_SYSTEM_PREFIX", "True").lower() == "true"
+            if strip_system_prefix and "<|endofprompt|>" in anchor_prompt_text:
+                anchor_prompt_text = anchor_prompt_text.split("<|endofprompt|>", 1)[1]
             if anchor_mode == "prompt_only":
-                llm_prompt_text = prompt_text
+                llm_prompt_text = anchor_prompt_text
             elif anchor_mode == "instruct_then_prompt":
-                llm_prompt_text = '{}{}'.format(instruct_text, prompt_text)
+                llm_prompt_text = '{}{}'.format(instruct_text, anchor_prompt_text)
             elif anchor_mode == "prompt_then_instruct":
-                llm_prompt_text = '{}{}'.format(prompt_text, instruct_text)
+                llm_prompt_text = '{}{}'.format(anchor_prompt_text, instruct_text)
         model_input = self.frontend_zero_shot(tts_text, llm_prompt_text, prompt_wav, resample_rate, zero_shot_spk_id)
         keep_llm_prompt_speech = os.getenv("COSYVOICE_INSTRUCT2_KEEP_LLM_PROMPT_SPEECH", "False").lower() == "true"
         if not keep_llm_prompt_speech:

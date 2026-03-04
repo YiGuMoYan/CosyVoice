@@ -15,20 +15,36 @@ python .\vllm_server.py
 
 ## 2) Benchmark latency
 
+HTTP mode (FastAPI):
+
 ```powershell
-python .\tools\benchmark_tts.py --url http://localhost:9880/tts/complete --concurrency 2 --rounds 5
+python .\tools\benchmark_tts.py --mode http --url http://localhost:9880/tts/complete --concurrency 2 --rounds 5
 ```
 
 Use your own testset:
 
 ```powershell
-python .\tools\benchmark_tts.py --text-file .\your_texts.txt --concurrency 1 --rounds 3 --output .\bench.json
+python .\tools\benchmark_tts.py --mode http --text-file .\your_texts.txt --concurrency 1 --rounds 3 --output .\bench.json
+```
+
+Local mode (no FastAPI):
+
+```powershell
+python .\tools\benchmark_tts.py --mode local --model-dir .\pretrained_models\Fun-CosyVoice3-0.5B --prompt-wav .\raw\merged_prompt.wav --prompt-text "You are a helpful assistant.<|endofprompt|>This is my prompt text." --rounds 3
+```
+
+Local mode with instruct2:
+
+```powershell
+python .\tools\benchmark_tts.py --mode local --model-dir .\pretrained_models\Fun-CosyVoice3-0.5B --prompt-wav .\raw\merged_prompt.wav --instruct "You are a helpful assistant.<|endofprompt|>" --stream --rounds 3
 ```
 
 ## 3) Suggested workflow
 
 1. Start with `clone_max.env` for similarity-first.
-2. Run `benchmark_tts.py` and record `first_audio_ms` + `total_ms`.
+2. Run `benchmark_tts.py` and record:
+   - HTTP mode: `first_audio_ms` + `total_ms`
+   - Local mode: `first_chunk_ms` + `total_ms` + `rtf`
 3. Tune these keys in order:
    - `COSYVOICE_TOKEN_HOP_LEN`
    - `COSYVOICE_STREAM_SCALE_FACTOR`

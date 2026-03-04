@@ -1,5 +1,6 @@
 import sys
 import os
+import shutil
 from pathlib import Path
 
 import torch
@@ -34,6 +35,15 @@ INSTRUCT2_KEEP_LLM_PROMPT_SPEECH = True
 REFINE_INSTRUCT2_WITH_VC = True
 VC_REFINE_PASSES = 2
 INSTRUCT2_ANCHOR_MODE = "prompt_only"
+MIN_AUDIO_SEC = 1.0
+MIN_AUDIO_RMS = 0.003
+MIN_AUDIO_PEAK = 0.02
+INSTRUCT2_CANDIDATES = [
+    {"name": "c1", "keep": True, "anchor": "prompt_only", "vc_passes": 1},
+    {"name": "c2", "keep": True, "anchor": "prompt_then_instruct", "vc_passes": 1},
+    {"name": "c3", "keep": False, "anchor": "instruct_only", "vc_passes": 1},
+    {"name": "c4", "keep": False, "anchor": "instruct_only", "vc_passes": 0},
+]
 # --------------------------------------------------------------------
 
 
@@ -66,14 +76,67 @@ def collect_wav_from_iterator(iterator) -> torch.Tensor:
     return wav
 
 
+def audio_stats(wav: torch.Tensor, sample_rate: int):
+    duration = float(wav.shape[1]) / float(sample_rate)
+    wav_f = wav.float()
+    rms = float(torch.sqrt(torch.mean(wav_f * wav_f)).item())
+    peak = float(torch.max(torch.abs(wav_f)).item())
+    return duration, rms, peak
+
+
+def is_bad_audio(wav: torch.Tensor, sample_rate: int) -> bool:
+    duration, rms, peak = audio_stats(wav, sample_rate)
+    return duration < MIN_AUDIO_SEC or rms < MIN_AUDIO_RMS or peak < MIN_AUDIO_PEAK
+
+
+def quality_score(wav: torch.Tensor, sample_rate: int) -> float:
+    duration, rms, peak = audio_stats(wav, sample_rate)
+    return duration * (rms + 1e-4) * (peak + 1e-4)
+
+
+def run_instruct2_candidate(cosyvoice, prompt_wav: str, out_dir: Path, cfg: dict):
+    os.environ["COSYVOICE_INSTRUCT2_KEEP_LLM_PROMPT_SPEECH"] = "True" if cfg["keep"] else "False"
+    os.environ["COSYVOICE_INSTRUCT2_ANCHOR_MODE"] = cfg["anchor"]
+    os.environ["COSYVOICE_INSTRUCT2_STRIP_SYSTEM_PREFIX"] = "True"
+
+    instruct_iter = cosyvoice.inference_instruct2(
+        INSTRUCT2_TEXT,
+        INSTRUCT_TEXT,
+        prompt_wav,
+        zero_shot_spk_id=ZERO_SHOT_SPK_ID,
+        stream=STREAM,
+        speed=SPEED,
+        text_frontend=TEXT_FRONTEND,
+        prompt_text=PROMPT_TEXT,
+    )
+    raw_wav = collect_wav_from_iterator(instruct_iter)
+    raw_path = out_dir / f"quick_instruct2_raw_{cfg['name']}.wav"
+    torchaudio.save(str(raw_path), raw_wav, cosyvoice.sample_rate)
+    print(f"done: {raw_path}")
+
+    final_wav = raw_wav
+    final_path = raw_path
+    if REFINE_INSTRUCT2_WITH_VC and cfg["vc_passes"] > 0:
+        vc_source_path = raw_path
+        for i in range(cfg["vc_passes"]):
+            vc_iter = cosyvoice.inference_vc(
+                str(vc_source_path),
+                prompt_wav,
+                stream=STREAM,
+                speed=SPEED,
+            )
+            final_wav = collect_wav_from_iterator(vc_iter)
+            pass_path = out_dir / f"quick_instruct2_{cfg['name']}_vc_pass{i + 1}.wav"
+            torchaudio.save(str(pass_path), final_wav, cosyvoice.sample_rate)
+            print(f"done: {pass_path}")
+            vc_source_path = pass_path
+            final_path = pass_path
+    return final_wav, final_path, raw_path
+
+
 def main() -> None:
     project_root = Path(__file__).resolve().parent
     prepare_import_path(project_root)
-    os.environ["COSYVOICE_INSTRUCT2_KEEP_LLM_PROMPT_SPEECH"] = (
-        "True" if INSTRUCT2_KEEP_LLM_PROMPT_SPEECH else "False"
-    )
-    os.environ["COSYVOICE_INSTRUCT2_ANCHOR_MODE"] = INSTRUCT2_ANCHOR_MODE
-    os.environ["COSYVOICE_INSTRUCT2_STRIP_SYSTEM_PREFIX"] = "True"
 
     if LOAD_VLLM:
         prepare_vllm_registry()
@@ -106,43 +169,43 @@ def main() -> None:
     torchaudio.save(str(zero_path), zero_wav, cosyvoice.sample_rate)
     print(f"done: {zero_path}")
 
-    instruct_iter = cosyvoice.inference_instruct2(
-        INSTRUCT2_TEXT,
-        INSTRUCT_TEXT,
-        prompt_wav,
-        zero_shot_spk_id=ZERO_SHOT_SPK_ID,
-        stream=STREAM,
-        speed=SPEED,
-        text_frontend=TEXT_FRONTEND,
-        prompt_text=PROMPT_TEXT,
-    )
-    instruct_wav = collect_wav_from_iterator(instruct_iter)
+    candidates = []
+    for cfg in INSTRUCT2_CANDIDATES:
+        try:
+            wav, final_path, raw_path = run_instruct2_candidate(cosyvoice, prompt_wav, out_dir, cfg)
+            bad = is_bad_audio(wav, cosyvoice.sample_rate)
+            score = quality_score(wav, cosyvoice.sample_rate)
+            duration, rms, peak = audio_stats(wav, cosyvoice.sample_rate)
+            print(
+                f"candidate={cfg['name']} bad={bad} score={score:.6f} "
+                f"dur={duration:.3f}s rms={rms:.6f} peak={peak:.6f}"
+            )
+            candidates.append(
+                {
+                    "cfg": cfg,
+                    "wav": wav,
+                    "final_path": final_path,
+                    "raw_path": raw_path,
+                    "bad": bad,
+                    "score": score,
+                }
+            )
+        except Exception as e:
+            print(f"candidate={cfg['name']} failed: {e}")
+
+    if not candidates:
+        raise RuntimeError("All instruct2 candidates failed.")
+
+    good = [x for x in candidates if not x["bad"]]
+    picked = max(good if good else candidates, key=lambda x: x["score"])
+
     instruct_raw_path = out_dir / "quick_instruct2_raw.wav"
-    torchaudio.save(str(instruct_raw_path), instruct_wav, cosyvoice.sample_rate)
+    shutil.copyfile(str(picked["raw_path"]), str(instruct_raw_path))
     print(f"done: {instruct_raw_path}")
 
-    if REFINE_INSTRUCT2_WITH_VC and VC_REFINE_PASSES > 0:
-        vc_source_path = instruct_raw_path
-        for i in range(VC_REFINE_PASSES):
-            vc_iter = cosyvoice.inference_vc(
-                str(vc_source_path),
-                prompt_wav,
-                stream=STREAM,
-                speed=SPEED,
-            )
-            refined_wav = collect_wav_from_iterator(vc_iter)
-            pass_path = out_dir / f"quick_instruct2_vc_pass{i + 1}.wav"
-            torchaudio.save(str(pass_path), refined_wav, cosyvoice.sample_rate)
-            print(f"done: {pass_path}")
-            vc_source_path = pass_path
-        instruct_path = out_dir / "quick_instruct2.wav"
-        if vc_source_path != instruct_path:
-            instruct_path.write_bytes(vc_source_path.read_bytes())
-        print(f"done: {instruct_path}")
-    else:
-        instruct_path = out_dir / "quick_instruct2.wav"
-        torchaudio.save(str(instruct_path), instruct_wav, cosyvoice.sample_rate)
-        print(f"done: {instruct_path}")
+    instruct_path = out_dir / "quick_instruct2.wav"
+    shutil.copyfile(str(picked["final_path"]), str(instruct_path))
+    print(f"done: {instruct_path}")
 
 
 if __name__ == "__main__":

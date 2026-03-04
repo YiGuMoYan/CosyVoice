@@ -26,6 +26,16 @@ from cosyvoice.utils.file_utils import convert_onnx_to_trt, export_cosyvoice2_vl
 from cosyvoice.utils.common import TrtContextWrapper
 
 
+def _pad_mel_to_min_frames(tts_mel: torch.Tensor, min_frames: int = 4) -> torch.Tensor:
+    if tts_mel.shape[2] >= min_frames:
+        return tts_mel
+    if tts_mel.shape[2] == 0:
+        return F.pad(tts_mel, (0, min_frames))
+    pad_frames = min_frames - tts_mel.shape[2]
+    tail = tts_mel[:, :, -1:].expand(-1, -1, pad_frames)
+    return torch.cat([tts_mel, tail], dim=2)
+
+
 class CosyVoiceModel:
 
     def __init__(
@@ -255,6 +265,7 @@ class CosyVoiceModel:
         if finalize is False:
             self.mel_overlap_dict[uuid] = tts_mel[:, :, -self.mel_overlap_len :]
             tts_mel = tts_mel[:, :, : -self.mel_overlap_len]
+            tts_mel = _pad_mel_to_min_frames(tts_mel, min_frames=4)
             tts_speech, tts_source = self.hift.inference(
                 speech_feat=tts_mel, cache_source=hift_cache_source
             )
@@ -276,6 +287,7 @@ class CosyVoiceModel:
                 tts_mel = F.interpolate(
                     tts_mel, size=int(tts_mel.shape[2] / speed), mode="linear"
                 )
+            tts_mel = _pad_mel_to_min_frames(tts_mel, min_frames=4)
             tts_speech, tts_source = self.hift.inference(
                 speech_feat=tts_mel, cache_source=hift_cache_source
             )
@@ -513,6 +525,7 @@ class CosyVoice2Model(CosyVoiceModel):
             hift_cache_source = torch.zeros(1, 1, 0)
         # keep overlap mel and hift cache
         if finalize is False:
+            tts_mel = _pad_mel_to_min_frames(tts_mel, min_frames=4)
             tts_speech, tts_source = self.hift.inference(
                 speech_feat=tts_mel, cache_source=hift_cache_source
             )
@@ -534,6 +547,7 @@ class CosyVoice2Model(CosyVoiceModel):
                 tts_mel = F.interpolate(
                     tts_mel, size=int(tts_mel.shape[2] / speed), mode="linear"
                 )
+            tts_mel = _pad_mel_to_min_frames(tts_mel, min_frames=4)
             tts_speech, tts_source = self.hift.inference(
                 speech_feat=tts_mel, cache_source=hift_cache_source
             )
@@ -759,6 +773,7 @@ class CosyVoice3Model(CosyVoice2Model):
                 tts_mel = F.interpolate(
                     tts_mel, size=int(tts_mel.shape[2] / speed), mode="linear"
                 )
+            tts_mel = _pad_mel_to_min_frames(tts_mel, min_frames=4)
             tts_speech, _ = self.hift.inference(speech_feat=tts_mel, finalize=finalize)
             tts_speech = tts_speech[:, self.hift_cache_dict[uuid]["speech_offset"] :]
             self.hift_cache_dict[uuid]["speech_offset"] += tts_speech.shape[1]

@@ -14,9 +14,9 @@ except Exception:
 
 
 DEFAULT_TEXTS = [
-    "Hello, this is a short test sentence for TTS benchmarking.",
-    "This sentence is a bit longer and is used to observe first chunk latency and total synthesis time.",
-    "The benchmark repeats multiple rounds so you can compare tuning profiles with stable metrics.",
+    "你好，今天感觉怎么样？我可以陪你聊聊天。",
+    "收到好友从远方寄来的生日礼物，那份意外的惊喜让我很开心。",
+    "这段文字稍微长一些，用来测试语音合成在长句情况下的首包和总时延表现。",
 ]
 
 
@@ -268,6 +268,15 @@ def run_local_once(model: Any, args: argparse.Namespace, text: str) -> Dict[str,
 
     total_ms = (time.perf_counter() - t0) * 1000
     rtf = (total_ms / 1000.0 / audio_sec) if audio_sec > 0 else 0.0
+    if args.min_audio_sec > 0 and audio_sec < args.min_audio_sec:
+        return {
+            "ok": False,
+            "status": 0,
+            "error": f"audio too short: {audio_sec:.4f}s < min_audio_sec={args.min_audio_sec}",
+            "text_len": len(text),
+            "audio_sec": audio_sec,
+            "chunk_count": chunk_count,
+        }
     return {
         "ok": True,
         "status": 200,
@@ -337,6 +346,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--register-vllm", action="store_true")
     parser.add_argument("--load-trt", action="store_true")
     parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--min-audio-sec", type=float, default=0.10)
     return parser.parse_args()
 
 

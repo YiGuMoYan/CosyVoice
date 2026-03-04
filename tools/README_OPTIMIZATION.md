@@ -39,6 +39,8 @@ Local mode with instruct2:
 python .\tools\benchmark_tts.py --mode local --model-dir .\pretrained_models\Fun-CosyVoice3-0.5B --prompt-wav .\raw\merged_prompt.wav --instruct "You are a helpful assistant.<|endofprompt|>" --stream --rounds 3
 ```
 
+Tip: local benchmark now supports `--min-audio-sec` (default `0.10`) to filter degenerate ultra-short outputs.
+
 ## 3) Suggested workflow
 
 1. Start with `clone_max.env` for similarity-first.

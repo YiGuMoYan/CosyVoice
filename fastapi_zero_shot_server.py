@@ -37,6 +37,8 @@ MODEL_LOAD_TRT = os.getenv("COSYVOICE_LOAD_TRT", "False").lower() == "true"
 MODEL_LOAD_VLLM = os.getenv("COSYVOICE_LOAD_VLLM", "True").lower() == "true"
 MODEL_FP16 = os.getenv("COSYVOICE_FP16", "False").lower() == "true"
 ALLOW_VLLM_FALLBACK = os.getenv("COSYVOICE_ALLOW_VLLM_FALLBACK", "True").lower() == "true"
+VLLM_TP = int(os.getenv("COSYVOICE_VLLM_TENSOR_PARALLEL_SIZE", "1"))
+VLLM_PP = int(os.getenv("COSYVOICE_VLLM_PIPELINE_PARALLEL_SIZE", "1"))
 
 
 app = FastAPI(title="CosyVoice ZeroShot FastAPI")
@@ -191,6 +193,8 @@ async def health():
         "mode": "zero_shot_only",
         "speaker_id": SPEAKER_ID,
         "load_vllm": load_vllm_used,
+        "vllm_tensor_parallel_size": VLLM_TP,
+        "vllm_pipeline_parallel_size": VLLM_PP,
     }
 
 

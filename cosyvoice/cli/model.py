@@ -471,6 +471,12 @@ class CosyVoice2Model(CosyVoiceModel):
         export_cosyvoice2_vllm(self.llm, model_dir, self.device)
         from vllm import EngineArgs, LLMEngine
 
+        tensor_parallel_size = max(
+            1, int(os.getenv("COSYVOICE_VLLM_TENSOR_PARALLEL_SIZE", "1"))
+        )
+        pipeline_parallel_size = max(
+            1, int(os.getenv("COSYVOICE_VLLM_PIPELINE_PARALLEL_SIZE", "1"))
+        )
         engine_args = EngineArgs(
             model=model_dir,
             skip_tokenizer_init=True,
@@ -478,6 +484,8 @@ class CosyVoice2Model(CosyVoiceModel):
             gpu_memory_utilization=float(
                 os.getenv("COSYVOICE_VLLM_GPU_MEMORY_UTILIZATION", "0.75")
             ),
+            tensor_parallel_size=tensor_parallel_size,
+            pipeline_parallel_size=pipeline_parallel_size,
         )
         self.llm.vllm = LLMEngine.from_engine_args(engine_args)
         self.llm.lock = threading.Lock()

@@ -11,19 +11,17 @@ MODEL_DIR = "pretrained_models/Fun-CosyVoice3-0.5B"
 PROMPT_WAV = "raw/merged_prompt.wav"
 OUTPUT_DIR = "output"
 
+# Keep user-provided texts unchanged.
+ZERO_SHOT_TEXT = "你好，我是洛天依，很高兴认识大家。"
 PROMPT_TEXT = (
     "You are a helpful assistant.<|endofprompt|>"
-    "Hello, I am Luo Tianyi. Nice to meet everyone."
+    "再用小部分白米饭和蓝米饭，做出天钿的耳机。唉，天钿，你去哪里，别跑啊。"
+    "嗯，这次的演唱会是一场观众朋友们期待很久，我也期待很久的演唱会。为了这次久别重逢。"
 )
+INSTRUCT2_TEXT = "你好，我是洛天依，很高兴认识大家。"
+INSTRUCT_TEXT = "You are a helpful assistant.<|endofprompt|>"
 
-ZERO_SHOT_TEXT = "Hello, this is the zero-shot synthesis test."
-INSTRUCT2_TEXT = "Hello, this is the instruct2 synthesis test."
-INSTRUCT_TEXT = (
-    "Please keep exactly the same speaker timbre as the prompt audio. "
-    "Do not change persona, role, accent, or age. Read naturally.<|endofprompt|>"
-)
 ZERO_SHOT_SPK_ID = ""
-
 STREAM = False
 TEXT_FRONTEND = True
 SPEED = 1.0

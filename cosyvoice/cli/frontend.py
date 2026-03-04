@@ -280,6 +280,9 @@ class CosyVoiceFrontEnd:
         return model_input
 
     def frontend_instruct2(self, tts_text, instruct_text, prompt_wav, resample_rate, zero_shot_spk_id, prompt_text=''):
+        force_empty_instruct = os.getenv("COSYVOICE_INSTRUCT2_FORCE_EMPTY_INSTRUCT", "False").lower() == "true"
+        if force_empty_instruct:
+            instruct_text = "<|endofprompt|>"
         anchor_mode = os.getenv("COSYVOICE_INSTRUCT2_ANCHOR_MODE", "instruct_only").lower()
         llm_prompt_text = instruct_text
         if prompt_text != '':

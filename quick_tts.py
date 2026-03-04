@@ -45,16 +45,20 @@ ASR_MODEL_NAME = "tiny"
 INSTRUCT2_CANDIDATES = [
     {"name": "c1", "keep": True, "anchor": "prompt_only", "vc_passes": 1, "instruct_override": "<|endofprompt|>"},
     {"name": "c2", "keep": False, "anchor": "instruct_only", "vc_passes": 1, "instruct_override": "<|endofprompt|>"},
-    {"name": "c3", "keep": True, "anchor": "prompt_then_instruct", "vc_passes": 1, "instruct_override": "保持原音色。<|endofprompt|>"},
-    {"name": "c4", "keep": False, "anchor": "instruct_only", "vc_passes": 0, "instruct_override": "保持原音色。<|endofprompt|>"},
+    {"name": "c3", "keep": True, "anchor": "prompt_then_instruct", "vc_passes": 1, "instruct_override": "<|endofprompt|>"},
+    {"name": "c4", "keep": False, "anchor": "instruct_only", "vc_passes": 0, "instruct_override": "<|endofprompt|>"},
 ]
 FALLBACK_TO_ZERO_SHOT_ON_LEAK = True
 FALLBACK_SIM_THRESHOLD = 0.55
+FINAL_STRICT_VERIFY = True
+FINAL_SIM_THRESHOLD = 0.70
 LEAK_PHRASES = [
     "请保持与提示音完全一致的音色与语气",
     "不要读出系统提示",
     "系统提示",
     "音色与语气",
+    "you are a helpful assistant",
+    "endofprompt",
 ]
 # --------------------------------------------------------------------
 
@@ -142,7 +146,8 @@ def run_instruct2_candidate(cosyvoice, prompt_wav: str, out_dir: Path, cfg: dict
     os.environ["COSYVOICE_INSTRUCT2_KEEP_LLM_PROMPT_SPEECH"] = "True" if cfg["keep"] else "False"
     os.environ["COSYVOICE_INSTRUCT2_ANCHOR_MODE"] = cfg["anchor"]
     os.environ["COSYVOICE_INSTRUCT2_STRIP_SYSTEM_PREFIX"] = "True"
-    os.environ["COSYVOICE_INSTRUCT2_SYSTEM_PROMPT"] = "You are a helpful assistant."
+    os.environ["COSYVOICE_INSTRUCT2_SYSTEM_PROMPT"] = ""
+    os.environ["COSYVOICE_INSTRUCT2_FORCE_EMPTY_INSTRUCT"] = "True"
 
     instruct_iter = cosyvoice.inference_instruct2(
         INSTRUCT2_TEXT,
@@ -300,6 +305,25 @@ def main() -> None:
         torchaudio.save(str(instruct_path), repair_wav, cosyvoice.sample_rate)
     else:
         shutil.copyfile(str(picked["final_path"]), str(instruct_path))
+
+    if FINAL_STRICT_VERIFY and asr_model is not None:
+        final_asr = transcribe_with_whisper(asr_model, instruct_path)
+        final_sim = text_similarity(final_asr, INSTRUCT2_TEXT)
+        final_leak = has_leak_phrase(final_asr)
+        print(f"final verify: sim={final_sim:.4f} leak={final_leak} asr='{final_asr}'")
+        if final_leak or final_sim < FINAL_SIM_THRESHOLD:
+            print("final fallback: force zero_shot synthesis to guarantee clean content.")
+            repair_iter = cosyvoice.inference_zero_shot(
+                INSTRUCT2_TEXT,
+                PROMPT_TEXT,
+                prompt_wav,
+                zero_shot_spk_id=ZERO_SHOT_SPK_ID,
+                stream=STREAM,
+                speed=SPEED,
+                text_frontend=TEXT_FRONTEND,
+            )
+            repair_wav = collect_wav_from_iterator(repair_iter)
+            torchaudio.save(str(instruct_path), repair_wav, cosyvoice.sample_rate)
     print(f"done: {instruct_path}")
 
 

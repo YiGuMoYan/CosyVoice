@@ -32,6 +32,8 @@ LOAD_TRT = False
 FP16 = False
 INSTRUCT2_KEEP_LLM_PROMPT_SPEECH = True
 REFINE_INSTRUCT2_WITH_VC = True
+VC_REFINE_PASSES = 2
+INSTRUCT2_ANCHOR_MODE = "prompt_then_instruct"
 # --------------------------------------------------------------------
 
 
@@ -70,6 +72,7 @@ def main() -> None:
     os.environ["COSYVOICE_INSTRUCT2_KEEP_LLM_PROMPT_SPEECH"] = (
         "True" if INSTRUCT2_KEEP_LLM_PROMPT_SPEECH else "False"
     )
+    os.environ["COSYVOICE_INSTRUCT2_ANCHOR_MODE"] = INSTRUCT2_ANCHOR_MODE
 
     if LOAD_VLLM:
         prepare_vllm_registry()
@@ -110,22 +113,30 @@ def main() -> None:
         stream=STREAM,
         speed=SPEED,
         text_frontend=TEXT_FRONTEND,
+        prompt_text=PROMPT_TEXT,
     )
     instruct_wav = collect_wav_from_iterator(instruct_iter)
     instruct_raw_path = out_dir / "quick_instruct2_raw.wav"
     torchaudio.save(str(instruct_raw_path), instruct_wav, cosyvoice.sample_rate)
     print(f"done: {instruct_raw_path}")
 
-    if REFINE_INSTRUCT2_WITH_VC:
-        vc_iter = cosyvoice.inference_vc(
-            str(instruct_raw_path),
-            prompt_wav,
-            stream=STREAM,
-            speed=SPEED,
-        )
-        refined_wav = collect_wav_from_iterator(vc_iter)
+    if REFINE_INSTRUCT2_WITH_VC and VC_REFINE_PASSES > 0:
+        vc_source_path = instruct_raw_path
+        for i in range(VC_REFINE_PASSES):
+            vc_iter = cosyvoice.inference_vc(
+                str(vc_source_path),
+                prompt_wav,
+                stream=STREAM,
+                speed=SPEED,
+            )
+            refined_wav = collect_wav_from_iterator(vc_iter)
+            pass_path = out_dir / f"quick_instruct2_vc_pass{i + 1}.wav"
+            torchaudio.save(str(pass_path), refined_wav, cosyvoice.sample_rate)
+            print(f"done: {pass_path}")
+            vc_source_path = pass_path
         instruct_path = out_dir / "quick_instruct2.wav"
-        torchaudio.save(str(instruct_path), refined_wav, cosyvoice.sample_rate)
+        if vc_source_path != instruct_path:
+            instruct_path.write_bytes(vc_source_path.read_bytes())
         print(f"done: {instruct_path}")
     else:
         instruct_path = out_dir / "quick_instruct2.wav"
